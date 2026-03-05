@@ -264,6 +264,16 @@ const TRIPS = [
     months: "May–Oct", priority: 1
   },
 
+  {
+    id: 66, name: "Angola", region: "Southern Africa",
+    countries: ["Angola"],
+    days: 9, leave: 5, cost: 2500, difficulty: "Hard",
+    route: "Sat → Sun. London → Luanda (via Lisbon — TAP direct). Or overland from Namibia.",
+    notes: "Africa's second-largest oil state. Luanda expensive but improving. Tundavala Gap, Kalandula Falls. Visa on arrival (sometimes e-visa). TAP via Lisbon ~£500. Hotels £40–80.",
+    bhTip: "—",
+    months: "May–Oct (dry)", priority: 2
+  },
+
   // ═══ INDIAN OCEAN ═══
   {
     id: 29, name: "Madagascar & Comoros", region: "Indian Ocean",
@@ -623,6 +633,8 @@ const TRIPS = [
 ];
 
 const ACTIVE_TRIPS = TRIPS.filter(t => t.countries.length > 0 && t.priority > 0);
+const TOTAL_COUNTRIES = 197; // UN 193 + 2 observers (Holy See, Palestine) + Kosovo + Taiwan
+const VISITED_COUNTRIES = 88;
 
 const REGION_COLORS = {
   "Europe": { accent: "#5B6ABF" }, "West Africa": { accent: "#D4872C" }, "Central Africa": { accent: "#C25B28" },
@@ -637,13 +649,13 @@ const PRI_LABELS = { 1: "Go First", 2: "Go Soon", 3: "Mid-term", 4: "Long-term",
 const DIFF_ORDER = { "Easy": 1, "Medium": 2, "Hard": 3, "Very Hard": 4, "Extreme": 5 };
 
 // ── Progress Ring SVG Component ──
-function ProgressRing({ radius, stroke, progress, color }) {
+function ProgressRing({ radius, stroke, progress, color, trackColor }) {
   const normalizedRadius = radius - stroke;
   const circumference = normalizedRadius * 2 * Math.PI;
   const strokeDashoffset = circumference - (progress / 100) * circumference;
   return (
     <svg height={radius * 2} width={radius * 2} style={{ transform: "rotate(-90deg)" }}>
-      <circle stroke="rgba(255,255,255,0.08)" fill="transparent" strokeWidth={stroke} r={normalizedRadius} cx={radius} cy={radius} />
+      <circle stroke={trackColor || "rgba(255,255,255,0.08)"} fill="transparent" strokeWidth={stroke} r={normalizedRadius} cx={radius} cy={radius} />
       <circle stroke={color} fill="transparent" strokeWidth={stroke} strokeDasharray={circumference + " " + circumference}
         style={{ strokeDashoffset, transition: "stroke-dashoffset 0.8s ease-in-out", strokeLinecap: "round" }}
         r={normalizedRadius} cx={radius} cy={radius} />
@@ -652,7 +664,7 @@ function ProgressRing({ radius, stroke, progress, color }) {
 }
 
 // ── Mini Bar Chart Component ──
-function MiniBarChart({ data, maxVal, height = 80, barColor }) {
+function MiniBarChart({ data, maxVal, height = 80, barColor, labelColor }) {
   const max = maxVal || Math.max(...data.map(d => d.value));
   return (
     <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height }}>
@@ -664,7 +676,7 @@ function MiniBarChart({ data, maxVal, height = 80, barColor }) {
             background: barColor || d.color || "#e94560",
             transition: "height 0.5s ease-out",
           }} title={`${d.label}: ${d.value}`} />
-          <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 40, textAlign: "center" }}>{d.label}</div>
+          <div style={{ fontSize: 8, color: labelColor || "rgba(255,255,255,0.4)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 40, textAlign: "center" }}>{d.label}</div>
         </div>
       ))}
     </div>
@@ -672,7 +684,7 @@ function MiniBarChart({ data, maxVal, height = 80, barColor }) {
 }
 
 // ── Donut Chart Component ──
-function DonutChart({ segments, size = 120, thickness = 16 }) {
+function DonutChart({ segments, size = 120, thickness = 16, textColor, subTextColor }) {
   const radius = (size - thickness) / 2;
   const circumference = 2 * Math.PI * radius;
   const total = segments.reduce((s, seg) => s + seg.value, 0);
@@ -694,8 +706,8 @@ function DonutChart({ segments, size = 120, thickness = 16 }) {
           </circle>
         );
       })}
-      <text x={size/2} y={size/2 - 4} textAnchor="middle" fill="#fff" fontSize="16" fontWeight="700" fontFamily="'DM Sans', sans-serif">{total}</text>
-      <text x={size/2} y={size/2 + 12} textAnchor="middle" fill="rgba(255,255,255,0.4)" fontSize="9" fontFamily="'Space Mono', monospace">TOTAL</text>
+      <text x={size/2} y={size/2 - 4} textAnchor="middle" fill={textColor || "#fff"} fontSize="16" fontWeight="700" fontFamily="'DM Sans', sans-serif">{total}</text>
+      <text x={size/2} y={size/2 + 12} textAnchor="middle" fill={subTextColor || "rgba(255,255,255,0.4)"} fontSize="9" fontFamily="'Space Mono', monospace">TOTAL</text>
     </svg>
   );
 }
@@ -753,7 +765,8 @@ export default function Planner() {
     };
   }, [done]);
 
-  const yearPlan = useMemo(() => {
+  // Auto-compute initial year plan
+  const autoYearPlan = useMemo(() => {
     const s = [...ACTIVE_TRIPS].sort((a, b) => a.priority - b.priority || a.leave - b.leave);
     const yrs = [];
     let cur = { year: 1, trips: [], leave: 0, days: 0, cost: 0 };
@@ -762,11 +775,46 @@ export default function Planner() {
         cur.trips.push(t); cur.leave += t.leave; cur.days += t.days; cur.cost += t.cost;
       } else {
         if (cur.trips.length) yrs.push(cur);
-        cur = { year: yrs.length + 2, trips: [t], leave: t.leave, days: t.days, cost: t.cost };
+        cur = { year: yrs.length + 1, trips: [t], leave: t.leave, days: t.days, cost: t.cost };
       }
     }
     if (cur.trips.length) yrs.push(cur);
     return yrs;
+  }, []);
+
+  // Interactive timeline: store trip-to-year assignments
+  const [tripYearOverrides, setTripYearOverrides] = useState(() => {
+    try { const s = localStorage.getItem("ecp-year-overrides"); return s ? JSON.parse(s) : {}; } catch { return {}; }
+  });
+  useEffect(() => { try { localStorage.setItem("ecp-year-overrides", JSON.stringify(tripYearOverrides)); } catch { /* ignored */ } }, [tripYearOverrides]);
+
+  const yearPlan = useMemo(() => {
+    // Build year map from auto plan as defaults, then apply overrides
+    const tripToYear = {};
+    autoYearPlan.forEach(y => y.trips.forEach(t => { tripToYear[t.id] = y.year; }));
+    // Apply user overrides
+    Object.entries(tripYearOverrides).forEach(([id, yr]) => { tripToYear[Number(id)] = yr; });
+    // Group trips by year
+    const yearMap = {};
+    ACTIVE_TRIPS.forEach(t => {
+      const yr = tripToYear[t.id] || 1;
+      if (!yearMap[yr]) yearMap[yr] = { year: yr, trips: [], leave: 0, days: 0, cost: 0 };
+      yearMap[yr].trips.push(t);
+      yearMap[yr].leave += t.leave;
+      yearMap[yr].days += t.days;
+      yearMap[yr].cost += t.cost;
+    });
+    return Object.values(yearMap).sort((a, b) => a.year - b.year);
+  }, [autoYearPlan, tripYearOverrides]);
+
+  const totalYears = yearPlan.length > 0 ? yearPlan[yearPlan.length - 1].year : 0;
+
+  const moveTripToYear = useCallback((tripId, newYear) => {
+    setTripYearOverrides(prev => ({ ...prev, [tripId]: newYear }));
+  }, []);
+
+  const resetTimeline = useCallback(() => {
+    setTripYearOverrides({});
   }, []);
 
   // Stats data for the stats tab
@@ -802,13 +850,23 @@ export default function Planner() {
   const T = dark ? {
     bg: "#111118", cardBg: "#1a1a24", text: "#e0e0e0", textSoft: "#999", textMuted: "#666",
     border: "rgba(255,255,255,0.08)", hoverBg: "#22222e", headerBg: "linear-gradient(135deg, #0d0d1a 0%, #0f1628 50%, #0d0d1a 100%)",
+    headerText: "#fff", headerSoft: "rgba(255,255,255,0.45)", headerMuted: "rgba(255,255,255,0.3)",
+    headerStatBg: "rgba(255,255,255,0.06)", headerStatBorder: "rgba(255,255,255,0.08)",
+    headerStatLabel: "rgba(255,255,255,0.4)", headerStatValue: "#fff", headerStatSub: "rgba(255,255,255,0.3)",
+    headerBarBg: "rgba(255,255,255,0.06)", headerBarLabel: "rgba(255,255,255,0.35)",
     inputBg: "#1a1a24", inputText: "#ccc", tabActive: "#fff", tabInactive: "#555",
     filterBg: "#1a1a24", filterActiveBg: "rgba(233,69,96,0.12)", sortBg: "#1a1a24",
+    ringTrack: "rgba(255,255,255,0.08)",
   } : {
     bg: "#f5f4f0", cardBg: "#fff", text: "#2d2d2d", textSoft: "#999", textMuted: "#aaa",
-    border: "rgba(0,0,0,0.06)", hoverBg: "#fafaf8", headerBg: "linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #1a1a2e 100%)",
+    border: "rgba(0,0,0,0.06)", hoverBg: "#fafaf8", headerBg: "linear-gradient(135deg, #f8f7f4 0%, #efeee9 50%, #f8f7f4 100%)",
+    headerText: "#1a1a2e", headerSoft: "rgba(0,0,0,0.45)", headerMuted: "rgba(0,0,0,0.3)",
+    headerStatBg: "rgba(0,0,0,0.03)", headerStatBorder: "rgba(0,0,0,0.06)",
+    headerStatLabel: "rgba(0,0,0,0.4)", headerStatValue: "#1a1a2e", headerStatSub: "rgba(0,0,0,0.35)",
+    headerBarBg: "rgba(0,0,0,0.06)", headerBarLabel: "rgba(0,0,0,0.4)",
     inputBg: "#fff", inputText: "#555", tabActive: "#1a1a2e", tabInactive: "#aaa",
     filterBg: "#fff", filterActiveBg: "rgba(192,57,43,0.06)", sortBg: "#fff",
+    ringTrack: "rgba(0,0,0,0.08)",
   };
 
   const S = {
@@ -816,7 +874,7 @@ export default function Planner() {
     lbl: { fontFamily: "'Space Mono'", fontSize: 10, color: T.textMuted, letterSpacing: 1.5, marginBottom: 4, textTransform: "uppercase" },
   };
 
-  const progressPct = (88 + stats.dc) / 195 * 100;
+  const progressPct = (VISITED_COUNTRIES + stats.dc) / TOTAL_COUNTRIES * 100;
 
   return (
     <div style={{ minHeight: "100vh", background: T.bg, color: T.text, fontFamily: "'DM Sans', sans-serif", transition: "background 0.3s ease, color 0.3s ease" }}>
@@ -831,7 +889,7 @@ export default function Planner() {
         .sort-btn { transition: all 0.15s ease; }
         .sort-btn:hover { border-color: #e94560 !important; color: #e94560 !important; }
         .dark-toggle { transition: all 0.2s ease; }
-        .dark-toggle:hover { background: rgba(255,255,255,0.15) !important; transform: scale(1.1); }
+        .dark-toggle:hover { opacity: 0.8; transform: scale(1.05); }
         .stat-card { transition: transform 0.2s ease, box-shadow 0.2s ease; }
         .stat-card:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
         .expand-content { animation: fadeIn 0.25s ease-out; }
@@ -840,53 +898,68 @@ export default function Planner() {
         .tooltip:hover::after { content: attr(data-tip); position: absolute; bottom: 120%; left: 50%; transform: translateX(-50%);
           padding: 4px 8px; background: #1a1a2e; color: #fff; font-size: 10px; border-radius: 4px; white-space: nowrap; z-index: 10;
           pointer-events: none; animation: fadeIn 0.15s ease; }
+        @media (max-width: 600px) {
+          .trip-stats-inline { display: none !important; }
+          .trip-cost-inline { font-size: 12px !important; min-width: 0 !important; }
+          .stats-grid-2col { grid-template-columns: 1fr !important; }
+          .stats-grid-4col { grid-template-columns: repeat(2, 1fr) !important; }
+          .region-donut-grid { grid-template-columns: 1fr !important; }
+          .budget-grand-grid { grid-template-columns: repeat(2, 1fr) !important; }
+          .tab-btn { padding: 13px 10px !important; font-size: 10px !important; letter-spacing: 0.5px !important; }
+        }
       `}</style>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
 
       {/* HEADER */}
-      <div style={{ background: T.headerBg, padding: "28px 24px 22px", position: "relative" }}>
+      <div style={{ background: T.headerBg, padding: "28px 24px 22px", position: "relative", borderBottom: dark ? "none" : "1px solid rgba(0,0,0,0.06)" }}>
         <div style={{ maxWidth: 960, margin: "0 auto" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-            <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+            <div style={{ minWidth: 0 }}>
               <div style={{ ...S.mono, fontSize: 11, color: "#e94560", letterSpacing: 3, textTransform: "uppercase", marginBottom: 6 }}>Every Country Project</div>
-              <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0, color: "#fff" }}>107 Countries · {ACTIVE_TRIPS.length} Trips</h1>
-              <div style={{ fontSize: 13, color: "rgba(255,255,255,0.45)", marginTop: 6 }}>London · 32 days leave/year · 88 done · weekends + bank holidays = free travel days</div>
+              <h1 style={{ fontSize: "clamp(18px, 4vw, 26px)", fontWeight: 700, margin: 0, color: T.headerText }}>{stats.tc} Countries · {ACTIVE_TRIPS.length} Trips</h1>
+              <div style={{ fontSize: 13, color: T.headerSoft, marginTop: 6 }}>London · 32 days leave/year · {VISITED_COUNTRIES} done · weekends + bank holidays = free travel days</div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               {/* Progress Ring */}
               <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <ProgressRing radius={36} stroke={5} progress={progressPct} color="#e94560" />
+                <ProgressRing radius={36} stroke={5} progress={progressPct} color="#e94560" trackColor={T.ringTrack} />
                 <div style={{ position: "absolute", textAlign: "center" }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{Math.round(progressPct)}%</div>
-                  <div style={{ fontSize: 7, color: "rgba(255,255,255,0.4)", ...S.mono }}>DONE</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: T.headerText }}>{Math.round(progressPct)}%</div>
+                  <div style={{ fontSize: 7, color: T.headerStatLabel, ...S.mono }}>DONE</div>
                 </div>
               </div>
               {/* Dark Mode Toggle */}
               <button className="dark-toggle" onClick={() => setDark(d => !d)} style={{
-                background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)",
-                borderRadius: 8, padding: "8px 10px", cursor: "pointer", fontSize: 18, lineHeight: 1,
-                color: "#fff",
+                background: dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.05)", border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"}`,
+                borderRadius: 8, padding: "7px 10px", cursor: "pointer", lineHeight: 1,
+                color: T.headerText, display: "flex", alignItems: "center", justifyContent: "center",
               }} title={dark ? "Switch to light mode" : "Switch to dark mode"}>
-                {dark ? "☀️" : "🌙"}
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  {dark ? (
+                    <><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></>
+                  ) : (
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                  )}
+                </svg>
               </button>
             </div>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginTop: 18 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginTop: 18 }}>
             {[
               { l: "TRIPS", v: ACTIVE_TRIPS.length, s: `${ACTIVE_TRIPS.length - done.size} left`, icon: "✈️" },
               { l: "LEAVE DAYS", v: stats.tl, s: `~${stats.yr} yrs at 32/yr`, icon: "📅" },
               { l: "TOTAL DAYS", v: stats.td, s: `${stats.td - stats.tl} are free weekends`, icon: "🌍" },
               { l: "EST. COST", v: `£${(stats.tco/1000).toFixed(0)}k`, s: `£${((stats.tco-stats.dco)/1000).toFixed(0)}k left`, icon: "💷" },
-              { l: "PROGRESS", v: `${88 + stats.dc}/195`, s: `${Math.round(progressPct)}% complete`, icon: "📊" },
+              { l: "PROGRESS", v: `${VISITED_COUNTRIES + stats.dc}/${TOTAL_COUNTRIES}`, s: `${Math.round(progressPct)}% complete`, icon: "📊" },
             ].map((s, i) => (
-              <div key={i} className="stat-card" style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "10px 12px", cursor: "default" }}>
+              <div key={i} className="stat-card" style={{ background: T.headerStatBg, border: `1px solid ${T.headerStatBorder}`, borderRadius: 8, padding: "10px 12px", cursor: "default" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div style={{ ...S.mono, fontSize: 9, color: "rgba(255,255,255,0.4)", letterSpacing: 2 }}>{s.l}</div>
+                  <div style={{ ...S.mono, fontSize: 9, color: T.headerStatLabel, letterSpacing: 2 }}>{s.l}</div>
                   <span style={{ fontSize: 14 }}>{s.icon}</span>
                 </div>
-                <div style={{ fontSize: 20, fontWeight: 700, color: "#fff", marginTop: 2 }}>{s.v}</div>
-                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 1 }}>{s.s}</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: T.headerStatValue, marginTop: 2 }}>{s.v}</div>
+                <div style={{ fontSize: 10, color: T.headerStatSub, marginTop: 1 }}>{s.s}</div>
               </div>
             ))}
           </div>
@@ -894,10 +967,10 @@ export default function Planner() {
           {/* Completion Progress Bar */}
           <div style={{ marginTop: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-              <span style={{ ...S.mono, fontSize: 9, color: "rgba(255,255,255,0.35)", letterSpacing: 1 }}>WORLD PROGRESS</span>
-              <span style={{ ...S.mono, fontSize: 9, color: "rgba(255,255,255,0.35)" }}>{88 + stats.dc} / 195 countries</span>
+              <span style={{ ...S.mono, fontSize: 9, color: T.headerBarLabel, letterSpacing: 1 }}>WORLD PROGRESS</span>
+              <span style={{ ...S.mono, fontSize: 9, color: T.headerBarLabel }}>{VISITED_COUNTRIES + stats.dc} / {TOTAL_COUNTRIES} countries</span>
             </div>
-            <div style={{ height: 6, background: "rgba(255,255,255,0.06)", borderRadius: 3, overflow: "hidden" }}>
+            <div style={{ height: 6, background: T.headerBarBg, borderRadius: 3, overflow: "hidden" }}>
               <div style={{
                 height: "100%", borderRadius: 3, transition: "width 0.8s ease-in-out",
                 width: `${progressPct}%`,
@@ -998,15 +1071,15 @@ export default function Planner() {
                         <div style={{ fontSize: 11.5, color: T.textSoft, marginTop: 3 }}>{trip.countries.join(" · ")}</div>
                       </div>
                       <div style={{ display: "flex", gap: 12, flexShrink: 0, alignItems: "center" }}>
-                        <div style={{ textAlign: "center" }}>
+                        <div className="trip-stats-inline" style={{ textAlign: "center" }}>
                           <div style={{ fontSize: 14, fontWeight: 700, color: "#e94560" }}>{trip.leave}d</div>
                           <div style={{ fontSize: 9, color: T.textMuted, ...S.mono }}>LEAVE</div>
                         </div>
-                        <div style={{ textAlign: "center" }}>
+                        <div className="trip-stats-inline" style={{ textAlign: "center" }}>
                           <div style={{ fontSize: 14, fontWeight: 600, color: dark ? "#e8e8e8" : "#1a1a2e" }}>{trip.days}d</div>
                           <div style={{ fontSize: 9, color: T.textMuted, ...S.mono }}>TOTAL</div>
                         </div>
-                        <div style={{ textAlign: "right", minWidth: 50 }}>
+                        <div className="trip-cost-inline" style={{ textAlign: "right", minWidth: 50 }}>
                           <div style={{ fontSize: 13, fontWeight: 600, color: dark ? "#e8e8e8" : "#1a1a2e" }}>£{trip.cost.toLocaleString()}</div>
                         </div>
                         <span style={{ color: T.textMuted, fontSize: 14, transform: isExp ? "rotate(180deg)" : "", transition: "transform 0.2s ease" }}>▾</span>
@@ -1075,11 +1148,11 @@ export default function Planner() {
         {tab === "stats" && (
           <div style={{ paddingTop: 18, paddingBottom: 40 }}>
             <div style={{ fontSize: 13, color: T.textSoft, marginBottom: 18, lineHeight: 1.6 }}>
-              Visual breakdown of your trip data — regions, difficulty, priorities, and key metrics at a glance.
+              Visual breakdown of potential trip data — regions, difficulty, priorities, and key metrics at a glance.
             </div>
 
             {/* Top-level quick stats */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 22 }}>
+            <div className="stats-grid-4col" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 22 }}>
               {[
                 { l: "Avg Cost/Trip", v: `£${Math.round(stats.tco / ACTIVE_TRIPS.length).toLocaleString()}`, c: "#e94560" },
                 { l: "Avg Leave/Trip", v: `${(stats.tl / ACTIVE_TRIPS.length).toFixed(1)}d`, c: "#2E86C1" },
@@ -1094,11 +1167,13 @@ export default function Planner() {
             </div>
 
             {/* Region Breakdown with Donut */}
-            <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 20, marginBottom: 24, padding: 18, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 10 }}>
+            <div className="region-donut-grid" style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 20, marginBottom: 24, padding: 18, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 10 }}>
               <div>
                 <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 1.5, marginBottom: 10 }}>BY REGION</div>
                 <DonutChart
                   size={120} thickness={14}
+                  textColor={dark ? "#fff" : "#1a1a2e"}
+                  subTextColor={T.textMuted}
                   segments={regionStats.map(([r, d]) => ({
                     label: r,
                     value: d.countries,
@@ -1121,7 +1196,7 @@ export default function Planner() {
             </div>
 
             {/* Difficulty & Priority side by side */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 24 }}>
+            <div className="stats-grid-2col" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 24 }}>
               <div style={{ padding: 16, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 10 }}>
                 <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 1.5, marginBottom: 12 }}>DIFFICULTY SPREAD</div>
                 {diffStats.map(([diff, count]) => (
@@ -1157,6 +1232,7 @@ export default function Planner() {
               <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 1.5, marginBottom: 12 }}>COST PER REGION</div>
               <MiniBarChart
                 height={100}
+                labelColor={T.textMuted}
                 data={regionStats.map(([r, d]) => ({
                   label: r.replace(/\s/g, "\n").slice(0, 8),
                   value: d.cost,
@@ -1166,7 +1242,7 @@ export default function Planner() {
             </div>
 
             {/* Top 5 most expensive & cheapest */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            <div className="stats-grid-2col" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
               <div style={{ padding: 16, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 10 }}>
                 <div style={{ ...S.mono, fontSize: 10, color: "#c0392b", letterSpacing: 1.5, marginBottom: 10 }}>💸 MOST EXPENSIVE</div>
                 {[...ACTIVE_TRIPS].sort((a, b) => b.cost - a.cost).slice(0, 5).map((t, i) => (
@@ -1192,28 +1268,38 @@ export default function Planner() {
         {/* ── TIMELINE ── */}
         {tab === "timeline" && (
           <div style={{ paddingTop: 18, paddingBottom: 40 }}>
-            <div style={{ fontSize: 13, color: T.textSoft, marginBottom: 6, lineHeight: 1.6 }}>
-              Year-by-year plan packing trips into 32 leave days. Remember: 5 leave days = 9 days travel. Bank holidays stretch further.
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+              <div style={{ fontSize: 13, color: T.textSoft, lineHeight: 1.6 }}>
+                Year-by-year plan packing trips into 32 leave days. Use the dropdowns to move trips between years.
+              </div>
+              {Object.keys(tripYearOverrides).length > 0 && (
+                <button onClick={resetTimeline} style={{
+                  padding: "5px 12px", borderRadius: 6, border: `1px solid ${T.border}`,
+                  background: T.cardBg, color: T.textSoft, fontSize: 11, cursor: "pointer",
+                  ...S.mono, letterSpacing: 0.5, flexShrink: 0,
+                }}>↺ Reset to auto</button>
+              )}
             </div>
             <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 18, padding: "8px 10px", background: dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)", borderRadius: 6 }}>
               🇬🇧 UK bank holidays: New Year · Good Friday + Easter Monday · Early May · Late May · August · Christmas + Boxing Day.
               Each one adjacent to a weekend can save 1 leave day. Easter alone = 10 days for 4 leave.
             </div>
             {yearPlan.map((year, yi) => (
-              <div key={yi} style={{ marginBottom: 18 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <div key={year.year} style={{ marginBottom: 18 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
                   <div style={{ ...S.mono, fontSize: 11, color: "#e94560", background: dark ? "rgba(233,69,96,0.12)" : "rgba(233,69,96,0.06)", padding: "3px 9px", borderRadius: 4, letterSpacing: 1 }}>YEAR {year.year}</div>
                   <div style={{ fontSize: 11, color: T.textSoft }}>
-                    <strong style={{ color: "#e94560" }}>{year.leave} leave</strong>
+                    <strong style={{ color: year.leave > 32 ? "#c0392b" : "#e94560" }}>{year.leave} leave</strong>
                     <span style={{ color: T.textMuted }}> / 32</span>
+                    {year.leave > 32 && <span style={{ color: "#c0392b", marginLeft: 4, fontSize: 10 }}>⚠ over budget!</span>}
                     <span style={{ marginLeft: 8 }}>{year.days} total days</span>
                     <span style={{ marginLeft: 8, color: T.textMuted }}>£{year.cost.toLocaleString()}</span>
                   </div>
-                  <div style={{ flex: 1, height: 1, background: T.border }} />
+                  <div style={{ flex: 1, height: 1, background: T.border, minWidth: 20 }} />
                 </div>
                 {/* Leave usage bar */}
                 <div style={{ height: 6, background: dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)", borderRadius: 3, marginBottom: 6, marginLeft: 6, marginRight: 6, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${year.leave / 32 * 100}%`, background: year.leave > 30 ? "#e94560" : year.leave > 25 ? "#e67e22" : "#27ae60", borderRadius: 3, transition: "width 0.5s ease" }} />
+                  <div style={{ height: "100%", width: `${Math.min(year.leave / 32 * 100, 100)}%`, background: year.leave > 32 ? "#c0392b" : year.leave > 30 ? "#e94560" : year.leave > 25 ? "#e67e22" : "#27ae60", borderRadius: 3, transition: "width 0.5s ease" }} />
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 3, paddingLeft: 6 }}>
                   {year.trips.map(t => {
@@ -1225,8 +1311,9 @@ export default function Planner() {
                         borderRadius: 5, borderLeft: `3px solid ${REGION_COLORS[t.region]?.accent || "#888"}`,
                         boxShadow: `0 1px 2px rgba(0,0,0,${dark ? "0.15" : "0.02"})`,
                         opacity: isDone ? 0.6 : 1, transition: "opacity 0.2s ease",
+                        flexWrap: "wrap",
                       }}>
-                        <div style={{ flex: 1 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
                           <span style={{ fontSize: 12.5, color: T.text }}>{t.name}</span>
                           <span style={{ fontSize: 10.5, color: T.textMuted, marginLeft: 6 }}>{t.countries.length} ctry</span>
                           {isDone && <span style={{ fontSize: 9, marginLeft: 6, color: "#27ae60" }}>✓</span>}
@@ -1234,6 +1321,21 @@ export default function Planner() {
                         <span style={{ fontSize: 11, color: "#e94560", fontWeight: 600, ...S.mono }}>{t.leave}d leave</span>
                         <span style={{ fontSize: 11, color: T.textMuted, ...S.mono }}>{t.days}d total</span>
                         <span style={{ fontSize: 11, color: T.textMuted, ...S.mono }}>£{t.cost.toLocaleString()}</span>
+                        <select
+                          value={year.year}
+                          onChange={e => moveTripToYear(t.id, Number(e.target.value))}
+                          onClick={e => e.stopPropagation()}
+                          style={{
+                            padding: "2px 4px", borderRadius: 4, border: `1px solid ${T.border}`,
+                            background: T.cardBg, color: T.inputText, fontSize: 10,
+                            cursor: "pointer", ...S.mono, minWidth: 52,
+                          }}
+                          title="Move to different year"
+                        >
+                          {Array.from({ length: totalYears + 2 }, (_, i) => i + 1).map(y => (
+                            <option key={y} value={y}>Yr {y}</option>
+                          ))}
+                        </select>
                       </div>
                     );
                   })}
@@ -1242,9 +1344,10 @@ export default function Planner() {
             ))}
             <div style={{ marginTop: 20, padding: 14, background: dark ? "rgba(233,69,96,0.08)" : "rgba(192,57,43,0.04)", border: "1px solid rgba(233,69,96,0.15)", borderRadius: 8 }}>
               <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 1.5, marginBottom: 5 }}>PROJECTED COMPLETION</div>
-              <div style={{ fontSize: 13.5, color: T.text }}>~{stats.yr} years using {stats.tl} leave days → all 195 by ~{2026 + stats.yr}</div>
+              <div style={{ fontSize: 13.5, color: T.text }}>~{totalYears} years using {stats.tl} leave days → all {TOTAL_COUNTRIES} by ~{2026 + totalYears}</div>
               <div style={{ fontSize: 12, color: T.textSoft, marginTop: 3 }}>
                 {stats.td} total travel days but only {stats.tl} cost leave — {stats.td - stats.tl} days are free weekends/BHs. Conflict zones add 3–5 year buffer. Bank holiday arbitrage could shave off another year.
+                {yearPlan.some(y => y.leave > 32) && <span style={{ color: "#c0392b" }}> ⚠ Some years exceed 32 leave days — adjust by moving trips.</span>}
               </div>
             </div>
           </div>
@@ -1279,7 +1382,7 @@ export default function Planner() {
             </div>
 
             <div style={{ ...S.lbl, marginBottom: 10 }}>VALUE: £ PER LEAVE DAY</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 22 }}>
+            <div className="stats-grid-2col" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 22 }}>
               {[
                 { l: "Great (< £250/leave day)", f: t => t.leave > 0 && t.cost/t.leave < 250, c: "#27ae60" },
                 { l: "Good (£250–500)", f: t => t.leave > 0 && t.cost/t.leave >= 250 && t.cost/t.leave < 500, c: "#e67e22" },
@@ -1299,7 +1402,7 @@ export default function Planner() {
 
             <div style={{ padding: 18, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 8 }}>
               <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 2, marginBottom: 8 }}>GRAND TOTAL</div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+              <div className="budget-grand-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
                 {[
                   [`£${(stats.tco/1000).toFixed(0)}k`, "Total"],
                   [`£${(stats.tco / Math.max(stats.yr, 1) / 1000).toFixed(1)}k`, "Per year"],
