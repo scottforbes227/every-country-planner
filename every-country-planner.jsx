@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 
 // leave = annual leave days used | days = total days including weekends
 const TRIPS = [
@@ -635,23 +635,109 @@ const REGION_COLORS = {
 const DIFF_COL = { "Easy": "#27ae60", "Medium": "#e67e22", "Hard": "#d35400", "Very Hard": "#c0392b", "Extreme": "#7B241C" };
 const PRI_LABELS = { 1: "Go First", 2: "Go Soon", 3: "Mid-term", 4: "Long-term", 5: "When Possible" };
 
+// ── Progress Ring SVG Component ──
+function ProgressRing({ radius, stroke, progress, color }) {
+  const normalizedRadius = radius - stroke;
+  const circumference = normalizedRadius * 2 * Math.PI;
+  const strokeDashoffset = circumference - (progress / 100) * circumference;
+  return (
+    <svg height={radius * 2} width={radius * 2} style={{ transform: "rotate(-90deg)" }}>
+      <circle stroke="rgba(255,255,255,0.08)" fill="transparent" strokeWidth={stroke} r={normalizedRadius} cx={radius} cy={radius} />
+      <circle stroke={color} fill="transparent" strokeWidth={stroke} strokeDasharray={circumference + " " + circumference}
+        style={{ strokeDashoffset, transition: "stroke-dashoffset 0.8s ease-in-out", strokeLinecap: "round" }}
+        r={normalizedRadius} cx={radius} cy={radius} />
+    </svg>
+  );
+}
+
+// ── Mini Bar Chart Component ──
+function MiniBarChart({ data, maxVal, height = 80, barColor }) {
+  const max = maxVal || Math.max(...data.map(d => d.value));
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height }}>
+      {data.map((d, i) => (
+        <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+          <div style={{
+            width: "100%", minWidth: 8, borderRadius: 3,
+            height: `${Math.max((d.value / max) * height * 0.85, 2)}px`,
+            background: barColor || d.color || "#e94560",
+            transition: "height 0.5s ease-out",
+          }} title={`${d.label}: ${d.value}`} />
+          <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 40, textAlign: "center" }}>{d.label}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Donut Chart Component ──
+function DonutChart({ segments, size = 120, thickness = 16 }) {
+  const radius = (size - thickness) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const total = segments.reduce((s, seg) => s + seg.value, 0);
+  let accum = 0;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      {segments.map((seg, i) => {
+        const pct = seg.value / total;
+        const dashLen = pct * circumference;
+        const dashOff = -(accum / total) * circumference;
+        accum += seg.value;
+        return (
+          <circle key={i} cx={size/2} cy={size/2} r={radius} fill="none"
+            stroke={seg.color} strokeWidth={thickness}
+            strokeDasharray={`${dashLen} ${circumference - dashLen}`}
+            strokeDashoffset={dashOff}
+            style={{ transform: "rotate(-90deg)", transformOrigin: "center", transition: "stroke-dasharray 0.5s ease" }}>
+            <title>{seg.label}: {seg.value}</title>
+          </circle>
+        );
+      })}
+      <text x={size/2} y={size/2 - 4} textAnchor="middle" fill="#fff" fontSize="16" fontWeight="700" fontFamily="'DM Sans', sans-serif">{total}</text>
+      <text x={size/2} y={size/2 + 12} textAnchor="middle" fill="rgba(255,255,255,0.4)" fontSize="9" fontFamily="'Space Mono', monospace">TOTAL</text>
+    </svg>
+  );
+}
+
 export default function Planner() {
   const [tab, setTab] = useState("trips");
   const [exp, setExp] = useState(null);
   const [sort, setSort] = useState("priority");
   const [region, setRegion] = useState("All");
-  const [done, setDone] = useState(new Set());
+  const [search, setSearch] = useState("");
+  const [diffFilter, setDiffFilter] = useState("All");
+  const [dark, setDark] = useState(() => {
+    try { return localStorage.getItem("ecp-dark") === "true"; } catch { return false; }
+  });
+  const [done, setDone] = useState(() => {
+    try { const s = localStorage.getItem("ecp-done"); return s ? new Set(JSON.parse(s)) : new Set(); } catch { return new Set(); }
+  });
+  const [hovered, setHovered] = useState(null);
+
+  // Persist dark mode & done state
+  useEffect(() => { try { localStorage.setItem("ecp-dark", dark); } catch {} }, [dark]);
+  useEffect(() => { try { localStorage.setItem("ecp-done", JSON.stringify([...done])); } catch {} }, [done]);
 
   const regions = useMemo(() => ["All", ...Array.from(new Set(ACTIVE_TRIPS.map(t => t.region)))], []);
+  const difficulties = useMemo(() => ["All", ...Array.from(new Set(ACTIVE_TRIPS.map(t => t.difficulty)))], []);
 
   const sorted = useMemo(() => {
     let f = ACTIVE_TRIPS.filter(t => region === "All" || t.region === region);
+    if (diffFilter !== "All") f = f.filter(t => t.difficulty === diffFilter);
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      f = f.filter(t => t.name.toLowerCase().includes(q) || t.countries.some(c => c.toLowerCase().includes(q)) || t.region.toLowerCase().includes(q));
+    }
     if (sort === "priority") f.sort((a, b) => a.priority - b.priority || a.leave - b.leave);
     else if (sort === "cost") f.sort((a, b) => a.cost - b.cost);
     else if (sort === "leave") f.sort((a, b) => a.leave - b.leave);
     else if (sort === "region") f.sort((a, b) => a.region.localeCompare(b.region) || a.priority - b.priority);
+    else if (sort === "difficulty") f.sort((a, b) => {
+      const order = { "Easy": 1, "Medium": 2, "Hard": 3, "Very Hard": 4, "Extreme": 5 };
+      return (order[a.difficulty] || 9) - (order[b.difficulty] || 9);
+    });
     return f;
-  }, [sort, region]);
+  }, [sort, region, search, diffFilter]);
 
   const stats = useMemo(() => {
     const all = ACTIVE_TRIPS;
@@ -685,128 +771,265 @@ export default function Planner() {
     return yrs;
   }, []);
 
-  const toggle = id => setDone(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  // Stats data for the stats tab
+  const regionStats = useMemo(() =>
+    Object.entries(ACTIVE_TRIPS.reduce((a, t) => {
+      if (!a[t.region]) a[t.region] = { cost: 0, days: 0, leave: 0, countries: 0, trips: 0, done: 0 };
+      a[t.region].cost += t.cost; a[t.region].days += t.days; a[t.region].leave += t.leave;
+      a[t.region].countries += t.countries.length; a[t.region].trips += 1;
+      if (done.has(t.id)) a[t.region].done += 1;
+      return a;
+    }, {})).sort((a, b) => b[1].countries - a[1].countries),
+  [done]);
+
+  const diffStats = useMemo(() =>
+    Object.entries(ACTIVE_TRIPS.reduce((a, t) => {
+      if (!a[t.difficulty]) a[t.difficulty] = 0;
+      a[t.difficulty]++;
+      return a;
+    }, {})).sort((a, b) => {
+      const order = { "Easy": 1, "Medium": 2, "Hard": 3, "Very Hard": 4, "Extreme": 5 };
+      return (order[a[0]] || 9) - (order[b[0]] || 9);
+    }),
+  []);
+
+  const priStats = useMemo(() =>
+    Object.entries(ACTIVE_TRIPS.reduce((a, t) => {
+      if (!a[t.priority]) a[t.priority] = 0;
+      a[t.priority]++;
+      return a;
+    }, {})).sort((a, b) => Number(a[0]) - Number(b[0])),
+  []);
+
+  const toggle = useCallback(id => setDone(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; }), []);
+
+  // Theme colors
+  const T = dark ? {
+    bg: "#111118", cardBg: "#1a1a24", text: "#e0e0e0", textSoft: "#999", textMuted: "#666",
+    border: "rgba(255,255,255,0.08)", hoverBg: "#22222e", headerBg: "linear-gradient(135deg, #0d0d1a 0%, #0f1628 50%, #0d0d1a 100%)",
+    inputBg: "#1a1a24", inputText: "#ccc", tabActive: "#fff", tabInactive: "#555",
+    filterBg: "#1a1a24", filterActiveBg: "rgba(233,69,96,0.12)", sortBg: "#1a1a24",
+  } : {
+    bg: "#f5f4f0", cardBg: "#fff", text: "#2d2d2d", textSoft: "#999", textMuted: "#aaa",
+    border: "rgba(0,0,0,0.06)", hoverBg: "#fafaf8", headerBg: "linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #1a1a2e 100%)",
+    inputBg: "#fff", inputText: "#555", tabActive: "#1a1a2e", tabInactive: "#aaa",
+    filterBg: "#fff", filterActiveBg: "rgba(192,57,43,0.06)", sortBg: "#fff",
+  };
 
   const S = {
     mono: { fontFamily: "'Space Mono', monospace" },
-    lbl: { fontFamily: "'Space Mono'", fontSize: 10, color: "#aaa", letterSpacing: 1.5, marginBottom: 4, textTransform: "uppercase" },
+    lbl: { fontFamily: "'Space Mono'", fontSize: 10, color: T.textMuted, letterSpacing: 1.5, marginBottom: 4, textTransform: "uppercase" },
   };
 
+  const progressPct = (88 + stats.dc) / 195 * 100;
+
   return (
-    <div style={{ minHeight: "100vh", background: "#f5f4f0", color: "#2d2d2d", fontFamily: "'DM Sans', sans-serif" }}>
+    <div style={{ minHeight: "100vh", background: T.bg, color: T.text, fontFamily: "'DM Sans', sans-serif", transition: "background 0.3s ease, color 0.3s ease" }}>
+      <style>{`
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes slideIn { from { opacity: 0; max-height: 0; } to { opacity: 1; max-height: 600px; } }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+        .trip-card { transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease; }
+        .trip-card:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.08) !important; }
+        .tab-btn { transition: all 0.2s ease; }
+        .tab-btn:hover { background: rgba(233,69,96,0.04); }
+        .sort-btn { transition: all 0.15s ease; }
+        .sort-btn:hover { border-color: #e94560 !important; color: #e94560 !important; }
+        .dark-toggle { transition: all 0.2s ease; }
+        .dark-toggle:hover { background: rgba(255,255,255,0.15) !important; transform: scale(1.1); }
+        .stat-card { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+        .stat-card:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
+        .expand-content { animation: fadeIn 0.25s ease-out; }
+        .search-input:focus { outline: none; border-color: #e94560 !important; box-shadow: 0 0 0 2px rgba(233,69,96,0.15); }
+        .tooltip { position: relative; }
+        .tooltip:hover::after { content: attr(data-tip); position: absolute; bottom: 120%; left: 50%; transform: translateX(-50%);
+          padding: 4px 8px; background: #1a1a2e; color: #fff; font-size: 10px; border-radius: 4px; white-space: nowrap; z-index: 10;
+          pointer-events: none; animation: fadeIn 0.15s ease; }
+      `}</style>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
 
       {/* HEADER */}
-      <div style={{ background: "linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #1a1a2e 100%)", padding: "28px 24px 22px" }}>
+      <div style={{ background: T.headerBg, padding: "28px 24px 22px", position: "relative" }}>
         <div style={{ maxWidth: 960, margin: "0 auto" }}>
-          <div style={{ ...S.mono, fontSize: 11, color: "#e94560", letterSpacing: 3, textTransform: "uppercase", marginBottom: 6 }}>Every Country Project</div>
-          <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0, color: "#fff" }}>107 Countries · {ACTIVE_TRIPS.length} Trips</h1>
-          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.45)", marginTop: 6 }}>London · 32 days leave/year · 88 done · weekends + bank holidays = free travel days</div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div>
+              <div style={{ ...S.mono, fontSize: 11, color: "#e94560", letterSpacing: 3, textTransform: "uppercase", marginBottom: 6 }}>Every Country Project</div>
+              <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0, color: "#fff" }}>107 Countries · {ACTIVE_TRIPS.length} Trips</h1>
+              <div style={{ fontSize: 13, color: "rgba(255,255,255,0.45)", marginTop: 6 }}>London · 32 days leave/year · 88 done · weekends + bank holidays = free travel days</div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              {/* Progress Ring */}
+              <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <ProgressRing radius={36} stroke={5} progress={progressPct} color="#e94560" />
+                <div style={{ position: "absolute", textAlign: "center" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{Math.round(progressPct)}%</div>
+                  <div style={{ fontSize: 7, color: "rgba(255,255,255,0.4)", ...S.mono }}>DONE</div>
+                </div>
+              </div>
+              {/* Dark Mode Toggle */}
+              <button className="dark-toggle" onClick={() => setDark(d => !d)} style={{
+                background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)",
+                borderRadius: 8, padding: "8px 10px", cursor: "pointer", fontSize: 18, lineHeight: 1,
+                color: "#fff",
+              }} title={dark ? "Switch to light mode" : "Switch to dark mode"}>
+                {dark ? "☀️" : "🌙"}
+              </button>
+            </div>
+          </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginTop: 18 }}>
             {[
-              { l: "TRIPS", v: ACTIVE_TRIPS.length, s: `${ACTIVE_TRIPS.length - done.size} left` },
-              { l: "LEAVE DAYS", v: stats.tl, s: `~${stats.yr} yrs at 32/yr` },
-              { l: "TOTAL DAYS", v: stats.td, s: `${stats.td - stats.tl} are free weekends` },
-              { l: "EST. COST", v: `£${(stats.tco/1000).toFixed(0)}k`, s: `£${((stats.tco-stats.dco)/1000).toFixed(0)}k left` },
-              { l: "PROGRESS", v: `${88 + stats.dc}/195`, s: `${((88 + stats.dc)/195*100).toFixed(0)}%` },
+              { l: "TRIPS", v: ACTIVE_TRIPS.length, s: `${ACTIVE_TRIPS.length - done.size} left`, icon: "✈️" },
+              { l: "LEAVE DAYS", v: stats.tl, s: `~${stats.yr} yrs at 32/yr`, icon: "📅" },
+              { l: "TOTAL DAYS", v: stats.td, s: `${stats.td - stats.tl} are free weekends`, icon: "🌍" },
+              { l: "EST. COST", v: `£${(stats.tco/1000).toFixed(0)}k`, s: `£${((stats.tco-stats.dco)/1000).toFixed(0)}k left`, icon: "💷" },
+              { l: "PROGRESS", v: `${88 + stats.dc}/195`, s: `${Math.round(progressPct)}% complete`, icon: "📊" },
             ].map((s, i) => (
-              <div key={i} style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "10px 12px" }}>
-                <div style={{ ...S.mono, fontSize: 9, color: "rgba(255,255,255,0.4)", letterSpacing: 2 }}>{s.l}</div>
+              <div key={i} className="stat-card" style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "10px 12px", cursor: "default" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ ...S.mono, fontSize: 9, color: "rgba(255,255,255,0.4)", letterSpacing: 2 }}>{s.l}</div>
+                  <span style={{ fontSize: 14 }}>{s.icon}</span>
+                </div>
                 <div style={{ fontSize: 20, fontWeight: 700, color: "#fff", marginTop: 2 }}>{s.v}</div>
                 <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 1 }}>{s.s}</div>
               </div>
             ))}
           </div>
+
+          {/* Completion Progress Bar */}
+          <div style={{ marginTop: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <span style={{ ...S.mono, fontSize: 9, color: "rgba(255,255,255,0.35)", letterSpacing: 1 }}>WORLD PROGRESS</span>
+              <span style={{ ...S.mono, fontSize: 9, color: "rgba(255,255,255,0.35)" }}>{88 + stats.dc} / 195 countries</span>
+            </div>
+            <div style={{ height: 6, background: "rgba(255,255,255,0.06)", borderRadius: 3, overflow: "hidden" }}>
+              <div style={{
+                height: "100%", borderRadius: 3, transition: "width 0.8s ease-in-out",
+                width: `${progressPct}%`,
+                background: "linear-gradient(90deg, #e94560, #f39c12, #27ae60)",
+              }} />
+            </div>
+          </div>
         </div>
       </div>
 
       <div style={{ maxWidth: 960, margin: "0 auto", padding: "0 24px" }}>
-        <div style={{ display: "flex", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
-          {["trips", "timeline", "budget"].map(t => (
-            <button key={t} onClick={() => setTab(t)} style={{
+        <div style={{ display: "flex", borderBottom: `1px solid ${T.border}` }}>
+          {["trips", "stats", "timeline", "budget"].map(t => (
+            <button key={t} className="tab-btn" onClick={() => setTab(t)} style={{
               padding: "13px 18px", background: "none", border: "none",
-              borderBottom: tab === t ? "2px solid #c0392b" : "2px solid transparent",
-              color: tab === t ? "#1a1a2e" : "#aaa",
+              borderBottom: tab === t ? "2px solid #e94560" : "2px solid transparent",
+              color: tab === t ? T.tabActive : T.tabInactive,
               ...S.mono, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer",
-            }}>{t}</button>
+            }}>{t === "stats" ? "📊 stats" : t}</button>
           ))}
         </div>
 
         {/* ── TRIPS ── */}
         {tab === "trips" && (
           <div style={{ paddingTop: 14, paddingBottom: 40 }}>
+            {/* Search Bar */}
+            <div style={{ marginBottom: 12 }}>
+              <input
+                className="search-input"
+                type="text" placeholder="🔍 Search trips, countries, or regions…" value={search} onChange={e => setSearch(e.target.value)}
+                style={{
+                  width: "100%", padding: "10px 14px", borderRadius: 8, fontSize: 13,
+                  border: `1px solid ${T.border}`, background: T.inputBg, color: T.inputText,
+                  boxSizing: "border-box", transition: "border-color 0.2s ease, box-shadow 0.2s ease",
+                }}
+              />
+            </div>
+
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14, alignItems: "center" }}>
-              <span style={{ ...S.mono, fontSize: 10, color: "#aaa", letterSpacing: 1 }}>SORT</span>
-              {["priority", "cost", "leave", "region"].map(s => (
-                <button key={s} onClick={() => setSort(s)} style={{
+              <span style={{ ...S.mono, fontSize: 10, color: T.textMuted, letterSpacing: 1 }}>SORT</span>
+              {["priority", "cost", "leave", "region", "difficulty"].map(s => (
+                <button key={s} className="sort-btn" onClick={() => setSort(s)} style={{
                   padding: "3px 9px", borderRadius: 4,
-                  border: `1px solid ${sort === s ? "#c0392b" : "rgba(0,0,0,0.1)"}`,
-                  background: sort === s ? "rgba(192,57,43,0.06)" : "#fff",
-                  color: sort === s ? "#c0392b" : "#888", fontSize: 11, cursor: "pointer",
+                  border: `1px solid ${sort === s ? "#e94560" : T.border}`,
+                  background: sort === s ? T.filterActiveBg : T.filterBg,
+                  color: sort === s ? "#e94560" : T.textSoft, fontSize: 11, cursor: "pointer",
                 }}>{s}</button>
               ))}
-              <span style={{ ...S.mono, fontSize: 10, color: "#aaa", letterSpacing: 1, marginLeft: 10 }}>REGION</span>
+              <span style={{ ...S.mono, fontSize: 10, color: T.textMuted, letterSpacing: 1, marginLeft: 10 }}>REGION</span>
               <select value={region} onChange={e => setRegion(e.target.value)} style={{
-                padding: "3px 8px", borderRadius: 4, border: "1px solid rgba(0,0,0,0.1)",
-                background: "#fff", color: "#555", fontSize: 11,
+                padding: "3px 8px", borderRadius: 4, border: `1px solid ${T.border}`,
+                background: T.filterBg, color: T.inputText, fontSize: 11,
               }}>
                 {regions.map(r => <option key={r}>{r}</option>)}
               </select>
+              <span style={{ ...S.mono, fontSize: 10, color: T.textMuted, letterSpacing: 1, marginLeft: 10 }}>DIFFICULTY</span>
+              <select value={diffFilter} onChange={e => setDiffFilter(e.target.value)} style={{
+                padding: "3px 8px", borderRadius: 4, border: `1px solid ${T.border}`,
+                background: T.filterBg, color: T.inputText, fontSize: 11,
+              }}>
+                {difficulties.map(d => <option key={d}>{d}</option>)}
+              </select>
+            </div>
+
+            {/* Results count */}
+            <div style={{ ...S.mono, fontSize: 10, color: T.textMuted, marginBottom: 8, letterSpacing: 1 }}>
+              {sorted.length} TRIP{sorted.length !== 1 ? "S" : ""} · {sorted.reduce((s, t) => s + t.countries.length, 0)} COUNTRIES
+              {done.size > 0 && <span style={{ marginLeft: 8, color: "#27ae60" }}>✓ {done.size} COMPLETED</span>}
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
               {sorted.map(trip => {
                 const isExp = exp === trip.id;
                 const isDone = done.has(trip.id);
+                const isHovered = hovered === trip.id;
                 const acc = REGION_COLORS[trip.region]?.accent || "#888";
                 return (
-                  <div key={trip.id} style={{
-                    background: isDone ? "rgba(39,174,96,0.05)" : "#fff",
-                    border: `1px solid ${isDone ? "rgba(39,174,96,0.2)" : "rgba(0,0,0,0.06)"}`,
-                    borderRadius: 8, overflow: "hidden", opacity: isDone ? 0.5 : 1,
-                    boxShadow: "0 1px 2px rgba(0,0,0,0.02)",
-                  }}>
+                  <div key={trip.id} className="trip-card" style={{
+                    background: isDone ? (dark ? "rgba(39,174,96,0.08)" : "rgba(39,174,96,0.05)") : T.cardBg,
+                    border: `1px solid ${isDone ? "rgba(39,174,96,0.2)" : isHovered ? acc + "40" : T.border}`,
+                    borderRadius: 8, overflow: "hidden", opacity: isDone ? 0.6 : 1,
+                    boxShadow: isHovered ? `0 4px 12px rgba(0,0,0,${dark ? "0.3" : "0.08"})` : `0 1px 2px rgba(0,0,0,0.02)`,
+                  }}
+                  onMouseEnter={() => setHovered(trip.id)}
+                  onMouseLeave={() => setHovered(null)}
+                  >
                     <div onClick={() => setExp(isExp ? null : trip.id)} style={{
                       padding: "12px 14px", cursor: "pointer", display: "flex", alignItems: "center", gap: 10,
                     }}>
-                      <div style={{ width: 4, height: 34, borderRadius: 2, background: acc, flexShrink: 0 }} />
+                      <div style={{ width: 4, height: 34, borderRadius: 2, background: acc, flexShrink: 0, transition: "height 0.2s" }} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                          <span style={{ fontWeight: 600, fontSize: 14, color: "#1a1a2e" }}>{trip.name}</span>
-                          <span style={{ fontSize: 9, padding: "2px 5px", borderRadius: 3, background: `${DIFF_COL[trip.difficulty]}12`, color: DIFF_COL[trip.difficulty], ...S.mono }}>{trip.difficulty}</span>
-                          <span style={{ fontSize: 9, padding: "2px 5px", borderRadius: 3, background: "rgba(0,0,0,0.03)", color: "#aaa", ...S.mono }}>P{trip.priority}</span>
+                          <span style={{ fontWeight: 600, fontSize: 14, color: dark ? "#e8e8e8" : "#1a1a2e" }}>{trip.name}</span>
+                          <span style={{ fontSize: 9, padding: "2px 5px", borderRadius: 3, background: `${DIFF_COL[trip.difficulty]}18`, color: DIFF_COL[trip.difficulty], ...S.mono }}>{trip.difficulty}</span>
+                          <span style={{ fontSize: 9, padding: "2px 5px", borderRadius: 3, background: dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.03)", color: T.textMuted, ...S.mono }}>{PRI_LABELS[trip.priority]}</span>
+                          {isDone && <span style={{ fontSize: 9, padding: "2px 5px", borderRadius: 3, background: "rgba(39,174,96,0.12)", color: "#27ae60", ...S.mono }}>✓ Done</span>}
                         </div>
-                        <div style={{ fontSize: 11.5, color: "#999", marginTop: 3 }}>{trip.countries.join(" · ")}</div>
+                        <div style={{ fontSize: 11.5, color: T.textSoft, marginTop: 3 }}>{trip.countries.join(" · ")}</div>
                       </div>
                       <div style={{ display: "flex", gap: 12, flexShrink: 0, alignItems: "center" }}>
                         <div style={{ textAlign: "center" }}>
-                          <div style={{ fontSize: 14, fontWeight: 700, color: "#c0392b" }}>{trip.leave}d</div>
-                          <div style={{ fontSize: 9, color: "#bbb", ...S.mono }}>LEAVE</div>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: "#e94560" }}>{trip.leave}d</div>
+                          <div style={{ fontSize: 9, color: T.textMuted, ...S.mono }}>LEAVE</div>
                         </div>
                         <div style={{ textAlign: "center" }}>
-                          <div style={{ fontSize: 14, fontWeight: 600, color: "#1a1a2e" }}>{trip.days}d</div>
-                          <div style={{ fontSize: 9, color: "#bbb", ...S.mono }}>TOTAL</div>
+                          <div style={{ fontSize: 14, fontWeight: 600, color: dark ? "#e8e8e8" : "#1a1a2e" }}>{trip.days}d</div>
+                          <div style={{ fontSize: 9, color: T.textMuted, ...S.mono }}>TOTAL</div>
                         </div>
                         <div style={{ textAlign: "right", minWidth: 50 }}>
-                          <div style={{ fontSize: 13, fontWeight: 600, color: "#1a1a2e" }}>£{trip.cost.toLocaleString()}</div>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: dark ? "#e8e8e8" : "#1a1a2e" }}>£{trip.cost.toLocaleString()}</div>
                         </div>
-                        <span style={{ color: "#ccc", fontSize: 14, transform: isExp ? "rotate(180deg)" : "", transition: "transform 0.15s" }}>▾</span>
+                        <span style={{ color: T.textMuted, fontSize: 14, transform: isExp ? "rotate(180deg)" : "", transition: "transform 0.2s ease" }}>▾</span>
                       </div>
                     </div>
 
                     {isExp && (
-                      <div style={{ padding: "0 14px 14px 28px", borderTop: "1px solid rgba(0,0,0,0.04)" }}>
+                      <div className="expand-content" style={{ padding: "0 14px 14px 28px", borderTop: `1px solid ${T.border}` }}>
                         <div style={{ paddingTop: 10, display: "grid", gap: 8 }}>
-                          <div><div style={S.lbl}>ROUTE</div><div style={{ fontSize: 13, color: "#444", lineHeight: 1.5 }}>{trip.route}</div></div>
-                          <div><div style={S.lbl}>NOTES</div><div style={{ fontSize: 13, color: "#555", lineHeight: 1.6 }}>{trip.notes}</div></div>
+                          <div><div style={S.lbl}>ROUTE</div><div style={{ fontSize: 13, color: dark ? "#bbb" : "#444", lineHeight: 1.5 }}>{trip.route}</div></div>
+                          <div><div style={S.lbl}>NOTES</div><div style={{ fontSize: 13, color: dark ? "#aaa" : "#555", lineHeight: 1.6 }}>{trip.notes}</div></div>
                           {trip.bhTip && trip.bhTip !== "—" && (
-                            <div style={{ background: "rgba(233,69,96,0.04)", border: "1px solid rgba(233,69,96,0.1)", borderRadius: 6, padding: "8px 10px" }}>
-                              <div style={{ ...S.lbl, color: "#c0392b", marginBottom: 2 }}>💡 BANK HOLIDAY TIP</div>
-                              <div style={{ fontSize: 12.5, color: "#555" }}>{trip.bhTip}</div>
+                            <div style={{ background: dark ? "rgba(233,69,96,0.08)" : "rgba(233,69,96,0.04)", border: "1px solid rgba(233,69,96,0.15)", borderRadius: 6, padding: "8px 10px" }}>
+                              <div style={{ ...S.lbl, color: "#e94560", marginBottom: 2 }}>💡 BANK HOLIDAY TIP</div>
+                              <div style={{ fontSize: 12.5, color: dark ? "#bbb" : "#555" }}>{trip.bhTip}</div>
                             </div>
                           )}
-                          <div style={{ display: "flex", gap: 18 }}>
+                          <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
                             {[
                               ["LEAVE DAYS", `${trip.leave} of 32`],
                               ["TOTAL DAYS", trip.days],
@@ -814,22 +1037,159 @@ export default function Planner() {
                               ["BEST MONTHS", trip.months],
                               ["£/LEAVE DAY", trip.leave > 0 ? `£${Math.round(trip.cost / trip.leave)}` : "free"],
                             ].map(([l, v], i) => (
-                              <div key={i}><div style={S.lbl}>{l}</div><div style={{ fontSize: 13, color: "#444" }}>{v}</div></div>
+                              <div key={i}><div style={S.lbl}>{l}</div><div style={{ fontSize: 13, color: dark ? "#ccc" : "#444" }}>{v}</div></div>
                             ))}
                           </div>
+                          {/* Cost bar visualization */}
+                          <div style={{ marginTop: 4 }}>
+                            <div style={S.lbl}>COST BREAKDOWN</div>
+                            <div style={{ display: "flex", gap: 4, alignItems: "center", marginTop: 4 }}>
+                              <div style={{ height: 8, borderRadius: 4, background: acc, width: `${Math.min(trip.cost / 100, 100)}%`, minWidth: 4, transition: "width 0.3s ease" }} />
+                              <span style={{ ...S.mono, fontSize: 10, color: T.textMuted }}>£{trip.cost.toLocaleString()}</span>
+                            </div>
+                          </div>
                           <button onClick={e => { e.stopPropagation(); toggle(trip.id); }} style={{
-                            marginTop: 2, padding: "7px 14px", borderRadius: 6,
-                            border: `1px solid ${isDone ? "#27ae60" : "rgba(0,0,0,0.1)"}`,
-                            background: isDone ? "rgba(39,174,96,0.07)" : "#f5f4f0",
-                            color: isDone ? "#27ae60" : "#888",
+                            marginTop: 4, padding: "8px 16px", borderRadius: 6,
+                            border: `1px solid ${isDone ? "#27ae60" : T.border}`,
+                            background: isDone ? "rgba(39,174,96,0.1)" : dark ? "#222" : "#f5f4f0",
+                            color: isDone ? "#27ae60" : T.textSoft,
                             fontSize: 12, cursor: "pointer", width: "fit-content",
-                          }}>{isDone ? "✓ Completed" : "Mark Complete"}</button>
+                            transition: "all 0.2s ease",
+                          }}>{isDone ? "✓ Completed — click to undo" : "Mark Complete"}</button>
                         </div>
                       </div>
                     )}
                   </div>
                 );
               })}
+              {sorted.length === 0 && (
+                <div style={{ textAlign: "center", padding: 40, color: T.textSoft }}>
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>🔍</div>
+                  <div style={{ fontSize: 14 }}>No trips match your filters</div>
+                  <button onClick={() => { setSearch(""); setRegion("All"); setDiffFilter("All"); }} style={{
+                    marginTop: 12, padding: "6px 14px", borderRadius: 6, border: `1px solid ${T.border}`,
+                    background: T.cardBg, color: T.textSoft, fontSize: 12, cursor: "pointer",
+                  }}>Clear filters</button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── STATS ── */}
+        {tab === "stats" && (
+          <div style={{ paddingTop: 18, paddingBottom: 40 }}>
+            <div style={{ fontSize: 13, color: T.textSoft, marginBottom: 18, lineHeight: 1.6 }}>
+              Visual breakdown of your trip data — regions, difficulty, priorities, and key metrics at a glance.
+            </div>
+
+            {/* Top-level quick stats */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 22 }}>
+              {[
+                { l: "Avg Cost/Trip", v: `£${Math.round(stats.tco / ACTIVE_TRIPS.length).toLocaleString()}`, c: "#e94560" },
+                { l: "Avg Leave/Trip", v: `${(stats.tl / ACTIVE_TRIPS.length).toFixed(1)}d`, c: "#2E86C1" },
+                { l: "Free Day Ratio", v: `${Math.round((stats.td - stats.tl) / stats.td * 100)}%`, c: "#27ae60" },
+                { l: "Countries/Trip", v: (stats.tc / ACTIVE_TRIPS.length).toFixed(1), c: "#884EA0" },
+              ].map((s, i) => (
+                <div key={i} style={{ padding: 14, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 8, textAlign: "center" }}>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: s.c }}>{s.v}</div>
+                  <div style={{ ...S.mono, fontSize: 9, color: T.textMuted, letterSpacing: 1.5, marginTop: 4 }}>{s.l}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Region Breakdown with Donut */}
+            <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 20, marginBottom: 24, padding: 18, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 10 }}>
+              <div>
+                <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 1.5, marginBottom: 10 }}>BY REGION</div>
+                <DonutChart
+                  size={120} thickness={14}
+                  segments={regionStats.map(([r, d]) => ({
+                    label: r,
+                    value: d.countries,
+                    color: REGION_COLORS[r]?.accent || "#888",
+                  }))}
+                />
+                <div style={{ ...S.mono, fontSize: 8, color: T.textMuted, textAlign: "center", marginTop: 6 }}>COUNTRIES</div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, justifyContent: "center" }}>
+                {regionStats.map(([r, d]) => (
+                  <div key={r} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ width: 10, height: 10, borderRadius: 2, background: REGION_COLORS[r]?.accent || "#888", flexShrink: 0 }} />
+                    <span style={{ fontSize: 12, color: T.text, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r}</span>
+                    <span style={{ ...S.mono, fontSize: 10, color: T.textMuted }}>{d.countries} ctry</span>
+                    <span style={{ ...S.mono, fontSize: 10, color: T.textMuted }}>{d.trips} trips</span>
+                    <span style={{ ...S.mono, fontSize: 10, color: "#e94560" }}>£{(d.cost/1000).toFixed(0)}k</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Difficulty & Priority side by side */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 24 }}>
+              <div style={{ padding: 16, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 10 }}>
+                <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 1.5, marginBottom: 12 }}>DIFFICULTY SPREAD</div>
+                {diffStats.map(([diff, count]) => (
+                  <div key={diff} style={{ marginBottom: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                      <span style={{ fontSize: 12, color: DIFF_COL[diff] || T.text, fontWeight: 600 }}>{diff}</span>
+                      <span style={{ ...S.mono, fontSize: 10, color: T.textMuted }}>{count} trips</span>
+                    </div>
+                    <div style={{ height: 6, background: dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)", borderRadius: 3, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${count / ACTIVE_TRIPS.length * 100}%`, background: DIFF_COL[diff] || "#888", borderRadius: 3, transition: "width 0.5s ease" }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ padding: 16, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 10 }}>
+                <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 1.5, marginBottom: 12 }}>PRIORITY BREAKDOWN</div>
+                {priStats.map(([pri, count]) => (
+                  <div key={pri} style={{ marginBottom: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                      <span style={{ fontSize: 12, color: T.text }}><span style={{ fontWeight: 600 }}>P{pri}</span> {PRI_LABELS[Number(pri)]}</span>
+                      <span style={{ ...S.mono, fontSize: 10, color: T.textMuted }}>{count} trips</span>
+                    </div>
+                    <div style={{ height: 6, background: dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)", borderRadius: 3, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${count / ACTIVE_TRIPS.length * 100}%`, background: `hsl(${(5 - Number(pri)) * 30}, 70%, 50%)`, borderRadius: 3, transition: "width 0.5s ease" }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Cost distribution */}
+            <div style={{ padding: 18, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 10, marginBottom: 24 }}>
+              <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 1.5, marginBottom: 12 }}>COST PER REGION</div>
+              <MiniBarChart
+                height={100}
+                data={regionStats.map(([r, d]) => ({
+                  label: r.replace(/\s/g, "\n").slice(0, 8),
+                  value: d.cost,
+                  color: REGION_COLORS[r]?.accent || "#888",
+                }))}
+              />
+            </div>
+
+            {/* Top 5 most expensive & cheapest */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+              <div style={{ padding: 16, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 10 }}>
+                <div style={{ ...S.mono, fontSize: 10, color: "#c0392b", letterSpacing: 1.5, marginBottom: 10 }}>💸 MOST EXPENSIVE</div>
+                {[...ACTIVE_TRIPS].sort((a, b) => b.cost - a.cost).slice(0, 5).map((t, i) => (
+                  <div key={t.id} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: i < 4 ? `1px solid ${T.border}` : "none" }}>
+                    <span style={{ fontSize: 12, color: T.text }}>{i+1}. {t.name}</span>
+                    <span style={{ ...S.mono, fontSize: 11, color: "#c0392b" }}>£{t.cost.toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{ padding: 16, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 10 }}>
+                <div style={{ ...S.mono, fontSize: 10, color: "#27ae60", letterSpacing: 1.5, marginBottom: 10 }}>🎯 BEST VALUE (£/LEAVE DAY)</div>
+                {[...ACTIVE_TRIPS].filter(t => t.leave > 0).sort((a, b) => (a.cost/a.leave) - (b.cost/b.leave)).slice(0, 5).map((t, i) => (
+                  <div key={t.id} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: i < 4 ? `1px solid ${T.border}` : "none" }}>
+                    <span style={{ fontSize: 12, color: T.text }}>{i+1}. {t.name}</span>
+                    <span style={{ ...S.mono, fontSize: 11, color: "#27ae60" }}>£{Math.round(t.cost/t.leave)}/day</span>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         )}
@@ -837,52 +1197,58 @@ export default function Planner() {
         {/* ── TIMELINE ── */}
         {tab === "timeline" && (
           <div style={{ paddingTop: 18, paddingBottom: 40 }}>
-            <div style={{ fontSize: 13, color: "#666", marginBottom: 6, lineHeight: 1.6 }}>
+            <div style={{ fontSize: 13, color: T.textSoft, marginBottom: 6, lineHeight: 1.6 }}>
               Year-by-year plan packing trips into 32 leave days. Remember: 5 leave days = 9 days travel. Bank holidays stretch further.
             </div>
-            <div style={{ fontSize: 12, color: "#999", marginBottom: 18, padding: "8px 10px", background: "rgba(0,0,0,0.02)", borderRadius: 6 }}>
+            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 18, padding: "8px 10px", background: dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)", borderRadius: 6 }}>
               🇬🇧 UK bank holidays: New Year · Good Friday + Easter Monday · Early May · Late May · August · Christmas + Boxing Day.
               Each one adjacent to a weekend can save 1 leave day. Easter alone = 10 days for 4 leave.
             </div>
             {yearPlan.map((year, yi) => (
               <div key={yi} style={{ marginBottom: 18 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-                  <div style={{ ...S.mono, fontSize: 11, color: "#c0392b", background: "rgba(192,57,43,0.06)", padding: "3px 9px", borderRadius: 4, letterSpacing: 1 }}>YEAR {year.year}</div>
-                  <div style={{ fontSize: 11, color: "#777" }}>
-                    <strong style={{ color: "#c0392b" }}>{year.leave} leave</strong>
-                    <span style={{ color: "#aaa" }}> / 32</span>
+                  <div style={{ ...S.mono, fontSize: 11, color: "#e94560", background: dark ? "rgba(233,69,96,0.12)" : "rgba(233,69,96,0.06)", padding: "3px 9px", borderRadius: 4, letterSpacing: 1 }}>YEAR {year.year}</div>
+                  <div style={{ fontSize: 11, color: T.textSoft }}>
+                    <strong style={{ color: "#e94560" }}>{year.leave} leave</strong>
+                    <span style={{ color: T.textMuted }}> / 32</span>
                     <span style={{ marginLeft: 8 }}>{year.days} total days</span>
-                    <span style={{ marginLeft: 8, color: "#aaa" }}>£{year.cost.toLocaleString()}</span>
+                    <span style={{ marginLeft: 8, color: T.textMuted }}>£{year.cost.toLocaleString()}</span>
                   </div>
-                  <div style={{ flex: 1, height: 1, background: "rgba(0,0,0,0.05)" }} />
+                  <div style={{ flex: 1, height: 1, background: T.border }} />
                 </div>
                 {/* Leave usage bar */}
-                <div style={{ height: 4, background: "rgba(0,0,0,0.04)", borderRadius: 2, marginBottom: 6, marginLeft: 6, marginRight: 6, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${year.leave / 32 * 100}%`, background: year.leave > 30 ? "#c0392b" : year.leave > 25 ? "#e67e22" : "#27ae60", borderRadius: 2 }} />
+                <div style={{ height: 6, background: dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)", borderRadius: 3, marginBottom: 6, marginLeft: 6, marginRight: 6, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${year.leave / 32 * 100}%`, background: year.leave > 30 ? "#e94560" : year.leave > 25 ? "#e67e22" : "#27ae60", borderRadius: 3, transition: "width 0.5s ease" }} />
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 3, paddingLeft: 6 }}>
-                  {year.trips.map(t => (
-                    <div key={t.id} style={{
-                      display: "flex", alignItems: "center", gap: 8, padding: "7px 10px",
-                      background: "#fff", borderRadius: 5, borderLeft: `3px solid ${REGION_COLORS[t.region]?.accent || "#888"}`,
-                      boxShadow: "0 1px 2px rgba(0,0,0,0.02)",
-                    }}>
-                      <div style={{ flex: 1 }}>
-                        <span style={{ fontSize: 12.5, color: "#2d2d2d" }}>{t.name}</span>
-                        <span style={{ fontSize: 10.5, color: "#bbb", marginLeft: 6 }}>{t.countries.length} ctry</span>
+                  {year.trips.map(t => {
+                    const isDone = done.has(t.id);
+                    return (
+                      <div key={t.id} style={{
+                        display: "flex", alignItems: "center", gap: 8, padding: "7px 10px",
+                        background: isDone ? (dark ? "rgba(39,174,96,0.08)" : "rgba(39,174,96,0.05)") : T.cardBg,
+                        borderRadius: 5, borderLeft: `3px solid ${REGION_COLORS[t.region]?.accent || "#888"}`,
+                        boxShadow: `0 1px 2px rgba(0,0,0,${dark ? "0.15" : "0.02"})`,
+                        opacity: isDone ? 0.6 : 1, transition: "opacity 0.2s ease",
+                      }}>
+                        <div style={{ flex: 1 }}>
+                          <span style={{ fontSize: 12.5, color: T.text }}>{t.name}</span>
+                          <span style={{ fontSize: 10.5, color: T.textMuted, marginLeft: 6 }}>{t.countries.length} ctry</span>
+                          {isDone && <span style={{ fontSize: 9, marginLeft: 6, color: "#27ae60" }}>✓</span>}
+                        </div>
+                        <span style={{ fontSize: 11, color: "#e94560", fontWeight: 600, ...S.mono }}>{t.leave}d leave</span>
+                        <span style={{ fontSize: 11, color: T.textMuted, ...S.mono }}>{t.days}d total</span>
+                        <span style={{ fontSize: 11, color: T.textMuted, ...S.mono }}>£{t.cost.toLocaleString()}</span>
                       </div>
-                      <span style={{ fontSize: 11, color: "#c0392b", fontWeight: 600, ...S.mono }}>{t.leave}d leave</span>
-                      <span style={{ fontSize: 11, color: "#aaa", ...S.mono }}>{t.days}d total</span>
-                      <span style={{ fontSize: 11, color: "#aaa", ...S.mono }}>£{t.cost.toLocaleString()}</span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ))}
-            <div style={{ marginTop: 20, padding: 14, background: "rgba(192,57,43,0.04)", border: "1px solid rgba(192,57,43,0.1)", borderRadius: 8 }}>
-              <div style={{ ...S.mono, fontSize: 10, color: "#c0392b", letterSpacing: 1.5, marginBottom: 5 }}>PROJECTED COMPLETION</div>
-              <div style={{ fontSize: 13.5, color: "#2d2d2d" }}>~{stats.yr} years using {stats.tl} leave days → all 195 by ~{2026 + stats.yr}</div>
-              <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>
+            <div style={{ marginTop: 20, padding: 14, background: dark ? "rgba(233,69,96,0.08)" : "rgba(192,57,43,0.04)", border: "1px solid rgba(233,69,96,0.15)", borderRadius: 8 }}>
+              <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 1.5, marginBottom: 5 }}>PROJECTED COMPLETION</div>
+              <div style={{ fontSize: 13.5, color: T.text }}>~{stats.yr} years using {stats.tl} leave days → all 195 by ~{2026 + stats.yr}</div>
+              <div style={{ fontSize: 12, color: T.textSoft, marginTop: 3 }}>
                 {stats.td} total travel days but only {stats.tl} cost leave — {stats.td - stats.tl} days are free weekends/BHs. Conflict zones add 3–5 year buffer. Bank holiday arbitrage could shave off another year.
               </div>
             </div>
@@ -892,7 +1258,7 @@ export default function Planner() {
         {/* ── BUDGET ── */}
         {tab === "budget" && (
           <div style={{ paddingTop: 18, paddingBottom: 40 }}>
-            <div style={{ fontSize: 13, color: "#666", marginBottom: 18, lineHeight: 1.6 }}>
+            <div style={{ fontSize: 13, color: T.textSoft, marginBottom: 18, lineHeight: 1.6 }}>
               Per person in GBP. Flights from London, budget-to-mid accommodation, local food, visas, transport. Excludes insurance, jabs, gear.
             </div>
 
@@ -907,11 +1273,11 @@ export default function Planner() {
               ).sort((a, b) => b[1].cost - a[1].cost).map(([r, d]) => (
                 <div key={r} style={{ marginBottom: 8 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                    <span style={{ fontSize: 12.5, color: "#333" }}>{r}</span>
-                    <span style={{ fontSize: 11, color: "#999", ...S.mono }}>£{d.cost.toLocaleString()} · {d.leave}d leave · {d.countries} ctry</span>
+                    <span style={{ fontSize: 12.5, color: T.text }}>{r}</span>
+                    <span style={{ fontSize: 11, color: T.textMuted, ...S.mono }}>£{d.cost.toLocaleString()} · {d.leave}d leave · {d.countries} ctry</span>
                   </div>
-                  <div style={{ height: 5, background: "rgba(0,0,0,0.04)", borderRadius: 3, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${d.cost / stats.tco * 100}%`, background: REGION_COLORS[r]?.accent || "#888", borderRadius: 3 }} />
+                  <div style={{ height: 6, background: dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)", borderRadius: 3, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${d.cost / stats.tco * 100}%`, background: REGION_COLORS[r]?.accent || "#888", borderRadius: 3, transition: "width 0.5s ease" }} />
                   </div>
                 </div>
               ))}
@@ -927,17 +1293,17 @@ export default function Planner() {
               ].map((tier, i) => {
                 const trips = ACTIVE_TRIPS.filter(tier.f);
                 return (
-                  <div key={i} style={{ padding: 12, background: "#fff", border: "1px solid rgba(0,0,0,0.06)", borderRadius: 8 }}>
+                  <div key={i} style={{ padding: 12, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 8 }}>
                     <div style={{ fontSize: 11.5, color: tier.c, fontWeight: 600, marginBottom: 3 }}>{tier.l}</div>
-                    <div style={{ fontSize: 20, fontWeight: 700, color: "#1a1a2e" }}>{trips.length} trips</div>
-                    <div style={{ fontSize: 10.5, color: "#aaa" }}>{trips.reduce((s, t) => s + t.countries.length, 0)} countries</div>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: dark ? "#e8e8e8" : "#1a1a2e" }}>{trips.length} trips</div>
+                    <div style={{ fontSize: 10.5, color: T.textMuted }}>{trips.reduce((s, t) => s + t.countries.length, 0)} countries</div>
                   </div>
                 );
               })}
             </div>
 
-            <div style={{ padding: 18, background: "#fff", border: "1px solid rgba(0,0,0,0.06)", borderRadius: 8 }}>
-              <div style={{ ...S.mono, fontSize: 10, color: "#c0392b", letterSpacing: 2, marginBottom: 8 }}>GRAND TOTAL</div>
+            <div style={{ padding: 18, background: T.cardBg, border: `1px solid ${T.border}`, borderRadius: 8 }}>
+              <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 2, marginBottom: 8 }}>GRAND TOTAL</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
                 {[
                   [`£${(stats.tco/1000).toFixed(0)}k`, "Total"],
@@ -946,12 +1312,12 @@ export default function Planner() {
                   [`£${Math.round(stats.tco / Math.max(stats.tl, 1))}`, "Per leave day"],
                 ].map(([v, l], i) => (
                   <div key={i}>
-                    <div style={{ fontSize: 24, fontWeight: 700, color: "#1a1a2e" }}>{v}</div>
-                    <div style={{ fontSize: 10.5, color: "#aaa" }}>{l}</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: dark ? "#e8e8e8" : "#1a1a2e" }}>{v}</div>
+                    <div style={{ fontSize: 10.5, color: T.textMuted }}>{l}</div>
                   </div>
                 ))}
               </div>
-              <div style={{ fontSize: 12, color: "#888", marginTop: 10, lineHeight: 1.6 }}>
+              <div style={{ fontSize: 12, color: T.textSoft, marginTop: 10, lineHeight: 1.6 }}>
                 Pacific islands (~£35k) are the biggest block. Priority 1 trips (years 1–4) use 30–32 leave days/year and average ~£6k/year covering 40+ countries. Ethiopia stopover costs 0 leave days. Bank holiday arbitrage on shorter trips (Andorra, San Marino, Liechtenstein, Qatar/Bahrain, Lesotho/Eswatini) can save 5–8 leave days per year.
               </div>
             </div>
