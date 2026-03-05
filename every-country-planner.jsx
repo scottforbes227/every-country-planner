@@ -634,6 +634,7 @@ const REGION_COLORS = {
 };
 const DIFF_COL = { "Easy": "#27ae60", "Medium": "#e67e22", "Hard": "#d35400", "Very Hard": "#c0392b", "Extreme": "#7B241C" };
 const PRI_LABELS = { 1: "Go First", 2: "Go Soon", 3: "Mid-term", 4: "Long-term", 5: "When Possible" };
+const DIFF_ORDER = { "Easy": 1, "Medium": 2, "Hard": 3, "Very Hard": 4, "Extreme": 5 };
 
 // ── Progress Ring SVG Component ──
 function ProgressRing({ radius, stroke, progress, color }) {
@@ -707,16 +708,16 @@ export default function Planner() {
   const [search, setSearch] = useState("");
   const [diffFilter, setDiffFilter] = useState("All");
   const [dark, setDark] = useState(() => {
-    try { return localStorage.getItem("ecp-dark") === "true"; } catch { return false; }
+    try { return localStorage.getItem("ecp-dark") === "true"; } catch { return false; /* localStorage unavailable (private browsing, etc.) */ }
   });
   const [done, setDone] = useState(() => {
-    try { const s = localStorage.getItem("ecp-done"); return s ? new Set(JSON.parse(s)) : new Set(); } catch { return new Set(); }
+    try { const s = localStorage.getItem("ecp-done"); return s ? new Set(JSON.parse(s)) : new Set(); } catch { return new Set(); /* localStorage unavailable or corrupted data */ }
   });
   const [hovered, setHovered] = useState(null);
 
-  // Persist dark mode & done state
-  useEffect(() => { try { localStorage.setItem("ecp-dark", dark); } catch {} }, [dark]);
-  useEffect(() => { try { localStorage.setItem("ecp-done", JSON.stringify([...done])); } catch {} }, [done]);
+  // Persist dark mode & done state — catch silently since localStorage may be unavailable in private browsing
+  useEffect(() => { try { localStorage.setItem("ecp-dark", dark); } catch { /* ignored */ } }, [dark]);
+  useEffect(() => { try { localStorage.setItem("ecp-done", JSON.stringify([...done])); } catch { /* ignored */ } }, [done]);
 
   const regions = useMemo(() => ["All", ...Array.from(new Set(ACTIVE_TRIPS.map(t => t.region)))], []);
   const difficulties = useMemo(() => ["All", ...Array.from(new Set(ACTIVE_TRIPS.map(t => t.difficulty)))], []);
@@ -732,10 +733,7 @@ export default function Planner() {
     else if (sort === "cost") f.sort((a, b) => a.cost - b.cost);
     else if (sort === "leave") f.sort((a, b) => a.leave - b.leave);
     else if (sort === "region") f.sort((a, b) => a.region.localeCompare(b.region) || a.priority - b.priority);
-    else if (sort === "difficulty") f.sort((a, b) => {
-      const order = { "Easy": 1, "Medium": 2, "Hard": 3, "Very Hard": 4, "Extreme": 5 };
-      return (order[a.difficulty] || 9) - (order[b.difficulty] || 9);
-    });
+    else if (sort === "difficulty") f.sort((a, b) => (DIFF_ORDER[a.difficulty] || 9) - (DIFF_ORDER[b.difficulty] || 9));
     return f;
   }, [sort, region, search, diffFilter]);
 
@@ -787,10 +785,7 @@ export default function Planner() {
       if (!a[t.difficulty]) a[t.difficulty] = 0;
       a[t.difficulty]++;
       return a;
-    }, {})).sort((a, b) => {
-      const order = { "Easy": 1, "Medium": 2, "Hard": 3, "Very Hard": 4, "Extreme": 5 };
-      return (order[a[0]] || 9) - (order[b[0]] || 9);
-    }),
+    }, {})).sort((a, b) => (DIFF_ORDER[a[0]] || 9) - (DIFF_ORDER[b[0]] || 9)),
   []);
 
   const priStats = useMemo(() =>
