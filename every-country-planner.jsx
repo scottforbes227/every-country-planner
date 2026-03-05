@@ -1,4 +1,6 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import Map from "./src/components/Map";
+import StatsBar from "./src/components/StatsBar";
+import useCountryData from "./src/hooks/useCountryData";
 
 // leave = annual leave days used | days = total days including weekends
 const TRIPS = [
@@ -648,21 +650,6 @@ const DIFF_COL = { "Easy": "#27ae60", "Medium": "#e67e22", "Hard": "#d35400", "V
 const PRI_LABELS = { 1: "Go First", 2: "Go Soon", 3: "Mid-term", 4: "Long-term", 5: "When Possible" };
 const DIFF_ORDER = { "Easy": 1, "Medium": 2, "Hard": 3, "Very Hard": 4, "Extreme": 5 };
 
-// ── Progress Ring SVG Component ──
-function ProgressRing({ radius, stroke, progress, color, trackColor }) {
-  const normalizedRadius = radius - stroke;
-  const circumference = normalizedRadius * 2 * Math.PI;
-  const strokeDashoffset = circumference - (progress / 100) * circumference;
-  return (
-    <svg height={radius * 2} width={radius * 2} style={{ transform: "rotate(-90deg)" }}>
-      <circle stroke={trackColor || "rgba(255,255,255,0.08)"} fill="transparent" strokeWidth={stroke} r={normalizedRadius} cx={radius} cy={radius} />
-      <circle stroke={color} fill="transparent" strokeWidth={stroke} strokeDasharray={circumference + " " + circumference}
-        style={{ strokeDashoffset, transition: "stroke-dashoffset 0.8s ease-in-out", strokeLinecap: "round" }}
-        r={normalizedRadius} cx={radius} cy={radius} />
-    </svg>
-  );
-}
-
 // ── Mini Bar Chart Component ──
 function MiniBarChart({ data, maxVal, height = 80, barColor, labelColor }) {
   const max = maxVal || Math.max(...data.map(d => d.value));
@@ -713,138 +700,45 @@ function DonutChart({ segments, size = 120, thickness = 16, textColor, subTextCo
 }
 
 export default function Planner() {
-  const [tab, setTab] = useState("trips");
-  const [exp, setExp] = useState(null);
-  const [sort, setSort] = useState("priority");
-  const [region, setRegion] = useState("All");
-  const [search, setSearch] = useState("");
-  const [diffFilter, setDiffFilter] = useState("All");
-  const [dark, setDark] = useState(() => {
-    try { return localStorage.getItem("ecp-dark") === "true"; } catch { return false; /* localStorage unavailable (private browsing, etc.) */ }
+  const {
+    tab,
+    setTab,
+    exp,
+    setExp,
+    sort,
+    setSort,
+    region,
+    setRegion,
+    search,
+    setSearch,
+    diffFilter,
+    setDiffFilter,
+    dark,
+    setDark,
+    done,
+    hovered,
+    setHovered,
+    regions,
+    difficulties,
+    sorted,
+    stats,
+    yearPlan,
+    totalYears,
+    tripYearOverrides,
+    moveTripToYear,
+    resetTimeline,
+    regionStats,
+    diffStats,
+    priStats,
+    toggle,
+    clearFilters,
+    progressPct,
+  } = useCountryData({
+    activeTrips: ACTIVE_TRIPS,
+    visitedCountries: VISITED_COUNTRIES,
+    totalCountries: TOTAL_COUNTRIES,
+    diffOrder: DIFF_ORDER,
   });
-  const [done, setDone] = useState(() => {
-    try { const s = localStorage.getItem("ecp-done"); return s ? new Set(JSON.parse(s)) : new Set(); } catch { return new Set(); /* localStorage unavailable or corrupted data */ }
-  });
-  const [hovered, setHovered] = useState(null);
-
-  // Persist dark mode & done state — catch silently since localStorage may be unavailable in private browsing
-  useEffect(() => { try { localStorage.setItem("ecp-dark", dark); } catch { /* ignored */ } }, [dark]);
-  useEffect(() => { try { localStorage.setItem("ecp-done", JSON.stringify([...done])); } catch { /* ignored */ } }, [done]);
-
-  const regions = useMemo(() => ["All", ...Array.from(new Set(ACTIVE_TRIPS.map(t => t.region)))], []);
-  const difficulties = useMemo(() => ["All", ...Array.from(new Set(ACTIVE_TRIPS.map(t => t.difficulty)))], []);
-
-  const sorted = useMemo(() => {
-    let f = ACTIVE_TRIPS.filter(t => region === "All" || t.region === region);
-    if (diffFilter !== "All") f = f.filter(t => t.difficulty === diffFilter);
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      f = f.filter(t => t.name.toLowerCase().includes(q) || t.countries.some(c => c.toLowerCase().includes(q)) || t.region.toLowerCase().includes(q));
-    }
-    if (sort === "priority") f.sort((a, b) => a.priority - b.priority || a.leave - b.leave);
-    else if (sort === "cost") f.sort((a, b) => a.cost - b.cost);
-    else if (sort === "leave") f.sort((a, b) => a.leave - b.leave);
-    else if (sort === "region") f.sort((a, b) => a.region.localeCompare(b.region) || a.priority - b.priority);
-    else if (sort === "difficulty") f.sort((a, b) => (DIFF_ORDER[a.difficulty] || 9) - (DIFF_ORDER[b.difficulty] || 9));
-    return f;
-  }, [sort, region, search, diffFilter]);
-
-  const stats = useMemo(() => {
-    const all = ACTIVE_TRIPS;
-    const dn = all.filter(t => done.has(t.id));
-    const tc = all.reduce((s, t) => s + t.countries.length, 0);
-    const td = all.reduce((s, t) => s + t.days, 0);
-    const tl = all.reduce((s, t) => s + t.leave, 0);
-    const tco = all.reduce((s, t) => s + t.cost, 0);
-    const yr = Math.ceil(tl / 32);
-    return {
-      tc, td, tl, tco, yr,
-      dc: dn.reduce((s, t) => s + t.countries.length, 0),
-      dco: dn.reduce((s, t) => s + t.cost, 0),
-      dl: dn.reduce((s, t) => s + t.leave, 0),
-    };
-  }, [done]);
-
-  // Auto-compute initial year plan
-  const autoYearPlan = useMemo(() => {
-    const s = [...ACTIVE_TRIPS].sort((a, b) => a.priority - b.priority || a.leave - b.leave);
-    const yrs = [];
-    let cur = { year: 1, trips: [], leave: 0, days: 0, cost: 0 };
-    for (const t of s) {
-      if (cur.leave + t.leave <= 32) {
-        cur.trips.push(t); cur.leave += t.leave; cur.days += t.days; cur.cost += t.cost;
-      } else {
-        if (cur.trips.length) yrs.push(cur);
-        cur = { year: yrs.length + 1, trips: [t], leave: t.leave, days: t.days, cost: t.cost };
-      }
-    }
-    if (cur.trips.length) yrs.push(cur);
-    return yrs;
-  }, []);
-
-  // Interactive timeline: store trip-to-year assignments
-  const [tripYearOverrides, setTripYearOverrides] = useState(() => {
-    try { const s = localStorage.getItem("ecp-year-overrides"); return s ? JSON.parse(s) : {}; } catch { return {}; }
-  });
-  useEffect(() => { try { localStorage.setItem("ecp-year-overrides", JSON.stringify(tripYearOverrides)); } catch { /* ignored */ } }, [tripYearOverrides]);
-
-  const yearPlan = useMemo(() => {
-    // Build year map from auto plan as defaults, then apply overrides
-    const tripToYear = {};
-    autoYearPlan.forEach(y => y.trips.forEach(t => { tripToYear[t.id] = y.year; }));
-    // Apply user overrides
-    Object.entries(tripYearOverrides).forEach(([id, yr]) => { tripToYear[Number(id)] = yr; });
-    // Group trips by year
-    const yearMap = {};
-    ACTIVE_TRIPS.forEach(t => {
-      const yr = tripToYear[t.id] || 1;
-      if (!yearMap[yr]) yearMap[yr] = { year: yr, trips: [], leave: 0, days: 0, cost: 0 };
-      yearMap[yr].trips.push(t);
-      yearMap[yr].leave += t.leave;
-      yearMap[yr].days += t.days;
-      yearMap[yr].cost += t.cost;
-    });
-    return Object.values(yearMap).sort((a, b) => a.year - b.year);
-  }, [autoYearPlan, tripYearOverrides]);
-
-  const totalYears = yearPlan.length > 0 ? yearPlan[yearPlan.length - 1].year : 0;
-
-  const moveTripToYear = useCallback((tripId, newYear) => {
-    setTripYearOverrides(prev => ({ ...prev, [tripId]: newYear }));
-  }, []);
-
-  const resetTimeline = useCallback(() => {
-    setTripYearOverrides({});
-  }, []);
-
-  // Stats data for the stats tab
-  const regionStats = useMemo(() =>
-    Object.entries(ACTIVE_TRIPS.reduce((a, t) => {
-      if (!a[t.region]) a[t.region] = { cost: 0, days: 0, leave: 0, countries: 0, trips: 0, done: 0 };
-      a[t.region].cost += t.cost; a[t.region].days += t.days; a[t.region].leave += t.leave;
-      a[t.region].countries += t.countries.length; a[t.region].trips += 1;
-      if (done.has(t.id)) a[t.region].done += 1;
-      return a;
-    }, {})).sort((a, b) => b[1].countries - a[1].countries),
-  [done]);
-
-  const diffStats = useMemo(() =>
-    Object.entries(ACTIVE_TRIPS.reduce((a, t) => {
-      if (!a[t.difficulty]) a[t.difficulty] = 0;
-      a[t.difficulty]++;
-      return a;
-    }, {})).sort((a, b) => (DIFF_ORDER[a[0]] || 9) - (DIFF_ORDER[b[0]] || 9)),
-  []);
-
-  const priStats = useMemo(() =>
-    Object.entries(ACTIVE_TRIPS.reduce((a, t) => {
-      if (!a[t.priority]) a[t.priority] = 0;
-      a[t.priority]++;
-      return a;
-    }, {})).sort((a, b) => Number(a[0]) - Number(b[0])),
-  []);
-
-  const toggle = useCallback(id => setDone(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; }), []);
 
   // Theme colors
   const T = dark ? {
@@ -873,8 +767,6 @@ export default function Planner() {
     mono: { fontFamily: "'Space Mono', monospace" },
     lbl: { fontFamily: "'Space Mono'", fontSize: 10, color: T.textMuted, letterSpacing: 1.5, marginBottom: 4, textTransform: "uppercase" },
   };
-
-  const progressPct = (VISITED_COUNTRIES + stats.dc) / TOTAL_COUNTRIES * 100;
 
   return (
     <div style={{ minHeight: "100vh", background: T.bg, color: T.text, fontFamily: "'DM Sans', sans-serif", transition: "background 0.3s ease, color 0.3s ease" }}>
@@ -909,77 +801,18 @@ export default function Planner() {
         }
       `}</style>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
-
-      {/* HEADER */}
-      <div style={{ background: T.headerBg, padding: "28px 24px 22px", position: "relative", borderBottom: dark ? "none" : "1px solid rgba(0,0,0,0.06)" }}>
-        <div style={{ maxWidth: 960, margin: "0 auto" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ ...S.mono, fontSize: 11, color: "#e94560", letterSpacing: 3, textTransform: "uppercase", marginBottom: 6 }}>Every Country Project</div>
-              <h1 style={{ fontSize: "clamp(18px, 4vw, 26px)", fontWeight: 700, margin: 0, color: T.headerText }}>{stats.tc} Countries · {ACTIVE_TRIPS.length} Trips</h1>
-              <div style={{ fontSize: 13, color: T.headerSoft, marginTop: 6 }}>London · 32 days leave/year · {VISITED_COUNTRIES} done · weekends + bank holidays = free travel days</div>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              {/* Progress Ring */}
-              <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <ProgressRing radius={36} stroke={5} progress={progressPct} color="#e94560" trackColor={T.ringTrack} />
-                <div style={{ position: "absolute", textAlign: "center" }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: T.headerText }}>{Math.round(progressPct)}%</div>
-                  <div style={{ fontSize: 7, color: T.headerStatLabel, ...S.mono }}>DONE</div>
-                </div>
-              </div>
-              {/* Dark Mode Toggle */}
-              <button className="dark-toggle" onClick={() => setDark(d => !d)} style={{
-                background: dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.05)", border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"}`,
-                borderRadius: 8, padding: "7px 10px", cursor: "pointer", lineHeight: 1,
-                color: T.headerText, display: "flex", alignItems: "center", justifyContent: "center",
-              }} title={dark ? "Switch to light mode" : "Switch to dark mode"}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  {dark ? (
-                    <><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></>
-                  ) : (
-                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-                  )}
-                </svg>
-              </button>
-            </div>
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginTop: 18 }}>
-            {[
-              { l: "TRIPS", v: ACTIVE_TRIPS.length, s: `${ACTIVE_TRIPS.length - done.size} left`, icon: "✈️" },
-              { l: "LEAVE DAYS", v: stats.tl, s: `~${stats.yr} yrs at 32/yr`, icon: "📅" },
-              { l: "TOTAL DAYS", v: stats.td, s: `${stats.td - stats.tl} are free weekends`, icon: "🌍" },
-              { l: "EST. COST", v: `£${(stats.tco/1000).toFixed(0)}k`, s: `£${((stats.tco-stats.dco)/1000).toFixed(0)}k left`, icon: "💷" },
-              { l: "PROGRESS", v: `${VISITED_COUNTRIES + stats.dc}/${TOTAL_COUNTRIES}`, s: `${Math.round(progressPct)}% complete`, icon: "📊" },
-            ].map((s, i) => (
-              <div key={i} className="stat-card" style={{ background: T.headerStatBg, border: `1px solid ${T.headerStatBorder}`, borderRadius: 8, padding: "10px 12px", cursor: "default" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div style={{ ...S.mono, fontSize: 9, color: T.headerStatLabel, letterSpacing: 2 }}>{s.l}</div>
-                  <span style={{ fontSize: 14 }}>{s.icon}</span>
-                </div>
-                <div style={{ fontSize: 20, fontWeight: 700, color: T.headerStatValue, marginTop: 2 }}>{s.v}</div>
-                <div style={{ fontSize: 10, color: T.headerStatSub, marginTop: 1 }}>{s.s}</div>
-              </div>
-            ))}
-          </div>
-
-          {/* Completion Progress Bar */}
-          <div style={{ marginTop: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-              <span style={{ ...S.mono, fontSize: 9, color: T.headerBarLabel, letterSpacing: 1 }}>WORLD PROGRESS</span>
-              <span style={{ ...S.mono, fontSize: 9, color: T.headerBarLabel }}>{VISITED_COUNTRIES + stats.dc} / {TOTAL_COUNTRIES} countries</span>
-            </div>
-            <div style={{ height: 6, background: T.headerBarBg, borderRadius: 3, overflow: "hidden" }}>
-              <div style={{
-                height: "100%", borderRadius: 3, transition: "width 0.8s ease-in-out",
-                width: `${progressPct}%`,
-                background: "linear-gradient(90deg, #e94560, #f39c12, #27ae60)",
-              }} />
-            </div>
-          </div>
-        </div>
-      </div>
+      <StatsBar
+        T={T}
+        S={S}
+        dark={dark}
+        setDark={setDark}
+        stats={stats}
+        activeTripsCount={ACTIVE_TRIPS.length}
+        done={done}
+        visitedCountries={VISITED_COUNTRIES}
+        totalCountries={TOTAL_COUNTRIES}
+        progressPct={progressPct}
+      />
 
       <div style={{ maxWidth: 960, margin: "0 auto", padding: "0 24px" }}>
         <div style={{ display: "flex", borderBottom: `1px solid ${T.border}` }}>
@@ -995,153 +828,32 @@ export default function Planner() {
 
         {/* ── TRIPS ── */}
         {tab === "trips" && (
-          <div style={{ paddingTop: 14, paddingBottom: 40 }}>
-            {/* Search Bar */}
-            <div style={{ marginBottom: 12 }}>
-              <input
-                className="search-input"
-                type="text" placeholder="🔍 Search trips, countries, or regions…" value={search} onChange={e => setSearch(e.target.value)}
-                style={{
-                  width: "100%", padding: "10px 14px", borderRadius: 8, fontSize: 13,
-                  border: `1px solid ${T.border}`, background: T.inputBg, color: T.inputText,
-                  boxSizing: "border-box", transition: "border-color 0.2s ease, box-shadow 0.2s ease",
-                }}
-              />
-            </div>
-
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14, alignItems: "center" }}>
-              <span style={{ ...S.mono, fontSize: 10, color: T.textMuted, letterSpacing: 1 }}>SORT</span>
-              {["priority", "cost", "leave", "region", "difficulty"].map(s => (
-                <button key={s} className="sort-btn" onClick={() => setSort(s)} style={{
-                  padding: "3px 9px", borderRadius: 4,
-                  border: `1px solid ${sort === s ? "#e94560" : T.border}`,
-                  background: sort === s ? T.filterActiveBg : T.filterBg,
-                  color: sort === s ? "#e94560" : T.textSoft, fontSize: 11, cursor: "pointer",
-                }}>{s}</button>
-              ))}
-              <span style={{ ...S.mono, fontSize: 10, color: T.textMuted, letterSpacing: 1, marginLeft: 10 }}>REGION</span>
-              <select value={region} onChange={e => setRegion(e.target.value)} style={{
-                padding: "3px 8px", borderRadius: 4, border: `1px solid ${T.border}`,
-                background: T.filterBg, color: T.inputText, fontSize: 11,
-              }}>
-                {regions.map(r => <option key={r}>{r}</option>)}
-              </select>
-              <span style={{ ...S.mono, fontSize: 10, color: T.textMuted, letterSpacing: 1, marginLeft: 10 }}>DIFFICULTY</span>
-              <select value={diffFilter} onChange={e => setDiffFilter(e.target.value)} style={{
-                padding: "3px 8px", borderRadius: 4, border: `1px solid ${T.border}`,
-                background: T.filterBg, color: T.inputText, fontSize: 11,
-              }}>
-                {difficulties.map(d => <option key={d}>{d}</option>)}
-              </select>
-            </div>
-
-            {/* Results count */}
-            <div style={{ ...S.mono, fontSize: 10, color: T.textMuted, marginBottom: 8, letterSpacing: 1 }}>
-              {sorted.length} TRIP{sorted.length !== 1 ? "S" : ""} · {sorted.reduce((s, t) => s + t.countries.length, 0)} COUNTRIES
-              {done.size > 0 && <span style={{ marginLeft: 8, color: "#27ae60" }}>✓ {done.size} COMPLETED</span>}
-            </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-              {sorted.map(trip => {
-                const isExp = exp === trip.id;
-                const isDone = done.has(trip.id);
-                const isHovered = hovered === trip.id;
-                const acc = REGION_COLORS[trip.region]?.accent || "#888";
-                return (
-                  <div key={trip.id} className="trip-card" style={{
-                    background: isDone ? (dark ? "rgba(39,174,96,0.08)" : "rgba(39,174,96,0.05)") : T.cardBg,
-                    border: `1px solid ${isDone ? "rgba(39,174,96,0.2)" : isHovered ? acc + "40" : T.border}`,
-                    borderRadius: 8, overflow: "hidden", opacity: isDone ? 0.6 : 1,
-                    boxShadow: isHovered ? `0 4px 12px rgba(0,0,0,${dark ? "0.3" : "0.08"})` : `0 1px 2px rgba(0,0,0,0.02)`,
-                  }}
-                  onMouseEnter={() => setHovered(trip.id)}
-                  onMouseLeave={() => setHovered(null)}
-                  >
-                    <div onClick={() => setExp(isExp ? null : trip.id)} style={{
-                      padding: "12px 14px", cursor: "pointer", display: "flex", alignItems: "center", gap: 10,
-                    }}>
-                      <div style={{ width: 4, height: 34, borderRadius: 2, background: acc, flexShrink: 0, transition: "height 0.2s" }} />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                          <span style={{ fontWeight: 600, fontSize: 14, color: dark ? "#e8e8e8" : "#1a1a2e" }}>{trip.name}</span>
-                          <span style={{ fontSize: 9, padding: "2px 5px", borderRadius: 3, background: `${DIFF_COL[trip.difficulty]}18`, color: DIFF_COL[trip.difficulty], ...S.mono }}>{trip.difficulty}</span>
-                          <span style={{ fontSize: 9, padding: "2px 5px", borderRadius: 3, background: dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.03)", color: T.textMuted, ...S.mono }}>{PRI_LABELS[trip.priority]}</span>
-                          {isDone && <span style={{ fontSize: 9, padding: "2px 5px", borderRadius: 3, background: "rgba(39,174,96,0.12)", color: "#27ae60", ...S.mono }}>✓ Done</span>}
-                        </div>
-                        <div style={{ fontSize: 11.5, color: T.textSoft, marginTop: 3 }}>{trip.countries.join(" · ")}</div>
-                      </div>
-                      <div style={{ display: "flex", gap: 12, flexShrink: 0, alignItems: "center" }}>
-                        <div className="trip-stats-inline" style={{ textAlign: "center" }}>
-                          <div style={{ fontSize: 14, fontWeight: 700, color: "#e94560" }}>{trip.leave}d</div>
-                          <div style={{ fontSize: 9, color: T.textMuted, ...S.mono }}>LEAVE</div>
-                        </div>
-                        <div className="trip-stats-inline" style={{ textAlign: "center" }}>
-                          <div style={{ fontSize: 14, fontWeight: 600, color: dark ? "#e8e8e8" : "#1a1a2e" }}>{trip.days}d</div>
-                          <div style={{ fontSize: 9, color: T.textMuted, ...S.mono }}>TOTAL</div>
-                        </div>
-                        <div className="trip-cost-inline" style={{ textAlign: "right", minWidth: 50 }}>
-                          <div style={{ fontSize: 13, fontWeight: 600, color: dark ? "#e8e8e8" : "#1a1a2e" }}>£{trip.cost.toLocaleString()}</div>
-                        </div>
-                        <span style={{ color: T.textMuted, fontSize: 14, transform: isExp ? "rotate(180deg)" : "", transition: "transform 0.2s ease" }}>▾</span>
-                      </div>
-                    </div>
-
-                    {isExp && (
-                      <div className="expand-content" style={{ padding: "0 14px 14px 28px", borderTop: `1px solid ${T.border}` }}>
-                        <div style={{ paddingTop: 10, display: "grid", gap: 8 }}>
-                          <div><div style={S.lbl}>ROUTE</div><div style={{ fontSize: 13, color: dark ? "#bbb" : "#444", lineHeight: 1.5 }}>{trip.route}</div></div>
-                          <div><div style={S.lbl}>NOTES</div><div style={{ fontSize: 13, color: dark ? "#aaa" : "#555", lineHeight: 1.6 }}>{trip.notes}</div></div>
-                          {trip.bhTip && trip.bhTip !== "—" && (
-                            <div style={{ background: dark ? "rgba(233,69,96,0.08)" : "rgba(233,69,96,0.04)", border: "1px solid rgba(233,69,96,0.15)", borderRadius: 6, padding: "8px 10px" }}>
-                              <div style={{ ...S.lbl, color: "#e94560", marginBottom: 2 }}>💡 BANK HOLIDAY TIP</div>
-                              <div style={{ fontSize: 12.5, color: dark ? "#bbb" : "#555" }}>{trip.bhTip}</div>
-                            </div>
-                          )}
-                          <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
-                            {[
-                              ["LEAVE DAYS", `${trip.leave} of 32`],
-                              ["TOTAL DAYS", trip.days],
-                              ["FREE DAYS", trip.days - trip.leave],
-                              ["BEST MONTHS", trip.months],
-                              ["£/LEAVE DAY", trip.leave > 0 ? `£${Math.round(trip.cost / trip.leave)}` : "free"],
-                            ].map(([l, v], i) => (
-                              <div key={i}><div style={S.lbl}>{l}</div><div style={{ fontSize: 13, color: dark ? "#ccc" : "#444" }}>{v}</div></div>
-                            ))}
-                          </div>
-                          {/* Cost bar visualization */}
-                          <div style={{ marginTop: 4 }}>
-                            <div style={S.lbl}>COST BREAKDOWN</div>
-                            <div style={{ display: "flex", gap: 4, alignItems: "center", marginTop: 4 }}>
-                              <div style={{ height: 8, borderRadius: 4, background: acc, width: `${Math.min(trip.cost / 100, 100)}%`, minWidth: 4, transition: "width 0.3s ease" }} />
-                              <span style={{ ...S.mono, fontSize: 10, color: T.textMuted }}>£{trip.cost.toLocaleString()}</span>
-                            </div>
-                          </div>
-                          <button onClick={e => { e.stopPropagation(); toggle(trip.id); }} style={{
-                            marginTop: 4, padding: "8px 16px", borderRadius: 6,
-                            border: `1px solid ${isDone ? "#27ae60" : T.border}`,
-                            background: isDone ? "rgba(39,174,96,0.1)" : dark ? "#222" : "#f5f4f0",
-                            color: isDone ? "#27ae60" : T.textSoft,
-                            fontSize: 12, cursor: "pointer", width: "fit-content",
-                            transition: "all 0.2s ease",
-                          }}>{isDone ? "✓ Completed — click to undo" : "Mark Complete"}</button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              {sorted.length === 0 && (
-                <div style={{ textAlign: "center", padding: 40, color: T.textSoft }}>
-                  <div style={{ fontSize: 32, marginBottom: 8 }}>🔍</div>
-                  <div style={{ fontSize: 14 }}>No trips match your filters</div>
-                  <button onClick={() => { setSearch(""); setRegion("All"); setDiffFilter("All"); }} style={{
-                    marginTop: 12, padding: "6px 14px", borderRadius: 6, border: `1px solid ${T.border}`,
-                    background: T.cardBg, color: T.textSoft, fontSize: 12, cursor: "pointer",
-                  }}>Clear filters</button>
-                </div>
-              )}
-            </div>
-          </div>
+          <Map
+            search={search}
+            setSearch={setSearch}
+            sort={sort}
+            setSort={setSort}
+            region={region}
+            setRegion={setRegion}
+            regions={regions}
+            diffFilter={diffFilter}
+            setDiffFilter={setDiffFilter}
+            difficulties={difficulties}
+            sorted={sorted}
+            done={done}
+            exp={exp}
+            setExp={setExp}
+            hovered={hovered}
+            setHovered={setHovered}
+            dark={dark}
+            clearFilters={clearFilters}
+            toggle={toggle}
+            T={T}
+            S={S}
+            REGION_COLORS={REGION_COLORS}
+            DIFF_COL={DIFF_COL}
+            PRI_LABELS={PRI_LABELS}
+          />
         )}
 
         {/* ── STATS ── */}
