@@ -635,6 +635,8 @@ const TRIPS = [
 const ACTIVE_TRIPS = TRIPS.filter(t => t.countries.length > 0 && t.priority > 0);
 const TOTAL_COUNTRIES = 197; // UN 193 + 2 observers (Holy See, Palestine) + Kosovo + Taiwan
 const VISITED_COUNTRIES = 88;
+const DEFAULT_LEAVE_PER_YEAR = 32;
+const SPECIAL_TIMELINE_BUCKETS = ["TBC", "?"];
 
 const REGION_COLORS = {
   "Europe": { accent: "#5B6ABF" }, "West Africa": { accent: "#D4872C" }, "Central Africa": { accent: "#C25B28" },
@@ -722,6 +724,16 @@ export default function Planner() {
   const [dark, setDark] = useState(() => {
     try { return localStorage.getItem("ecp-dark") === "true"; } catch { return false; /* localStorage unavailable (private browsing, etc.) */ }
   });
+  const [leavePerYear, setLeavePerYear] = useState(() => {
+    try {
+      const s = localStorage.getItem("ecp-leave-per-year");
+      const v = s ? Number(s) : DEFAULT_LEAVE_PER_YEAR;
+      return Number.isFinite(v) && v > 0 ? v : DEFAULT_LEAVE_PER_YEAR;
+    } catch { return DEFAULT_LEAVE_PER_YEAR; }
+  });
+  const [splitTripOverrides, setSplitTripOverrides] = useState(() => {
+    try { const s = localStorage.getItem("ecp-split-trips"); return s ? JSON.parse(s) : {}; } catch { return {}; }
+  });
   const [done, setDone] = useState(() => {
     try { const s = localStorage.getItem("ecp-done"); return s ? new Set(JSON.parse(s)) : new Set(); } catch { return new Set(); /* localStorage unavailable or corrupted data */ }
   });
@@ -729,6 +741,8 @@ export default function Planner() {
 
   // Persist dark mode & done state — catch silently since localStorage may be unavailable in private browsing
   useEffect(() => { try { localStorage.setItem("ecp-dark", dark); } catch { /* ignored */ } }, [dark]);
+  useEffect(() => { try { localStorage.setItem("ecp-leave-per-year", String(leavePerYear)); } catch { /* ignored */ } }, [leavePerYear]);
+  useEffect(() => { try { localStorage.setItem("ecp-split-trips", JSON.stringify(splitTripOverrides)); } catch { /* ignored */ } }, [splitTripOverrides]);
   useEffect(() => { try { localStorage.setItem("ecp-done", JSON.stringify([...done])); } catch { /* ignored */ } }, [done]);
 
   const regions = useMemo(() => ["All", ...Array.from(new Set(ACTIVE_TRIPS.map(t => t.region)))], []);
@@ -756,22 +770,56 @@ export default function Planner() {
     const td = all.reduce((s, t) => s + t.days, 0);
     const tl = all.reduce((s, t) => s + t.leave, 0);
     const tco = all.reduce((s, t) => s + t.cost, 0);
-    const yr = Math.ceil(tl / 32);
+    const yr = Math.ceil(tl / leavePerYear);
     return {
       tc, td, tl, tco, yr,
       dc: dn.reduce((s, t) => s + t.countries.length, 0),
       dco: dn.reduce((s, t) => s + t.cost, 0),
       dl: dn.reduce((s, t) => s + t.leave, 0),
     };
-  }, [done]);
+  }, [done, leavePerYear]);
+
+  const timelineItems = useMemo(() => (
+    ACTIVE_TRIPS.flatMap(trip => {
+      const baseKey = String(trip.id);
+      const shouldSplit = splitTripOverrides[trip.id] && trip.countries.length > 1;
+      if (!shouldSplit) {
+        return [{
+          ...trip,
+          timelineId: baseKey,
+          baseKey,
+          displayName: trip.name,
+          isSplit: false,
+          splitIndex: null,
+          splitCount: trip.countries.length,
+          splitParent: null,
+        }];
+      }
+      const count = trip.countries.length;
+      return trip.countries.map((country, index) => ({
+        ...trip,
+        timelineId: `${trip.id}:${index}`,
+        baseKey,
+        displayName: country,
+        isSplit: true,
+        splitIndex: index,
+        splitCount: count,
+        splitParent: trip.name,
+        countries: [country],
+        days: trip.days / count,
+        leave: trip.leave / count,
+        cost: trip.cost / count,
+      }));
+    })
+  ), [splitTripOverrides]);
 
   // Auto-compute initial year plan
   const autoYearPlan = useMemo(() => {
-    const s = [...ACTIVE_TRIPS].sort((a, b) => a.priority - b.priority || a.leave - b.leave);
+    const s = [...timelineItems].sort((a, b) => a.priority - b.priority || a.leave - b.leave);
     const yrs = [];
     let cur = { year: 1, trips: [], leave: 0, days: 0, cost: 0 };
     for (const t of s) {
-      if (cur.leave + t.leave <= 32) {
+      if (cur.leave + t.leave <= leavePerYear) {
         cur.trips.push(t); cur.leave += t.leave; cur.days += t.days; cur.cost += t.cost;
       } else {
         if (cur.trips.length) yrs.push(cur);
@@ -780,7 +828,7 @@ export default function Planner() {
     }
     if (cur.trips.length) yrs.push(cur);
     return yrs;
-  }, []);
+  }, [timelineItems, leavePerYear]);
 
   // Interactive timeline: store trip-to-year assignments
   const [tripYearOverrides, setTripYearOverrides] = useState(() => {
@@ -788,29 +836,68 @@ export default function Planner() {
   });
   useEffect(() => { try { localStorage.setItem("ecp-year-overrides", JSON.stringify(tripYearOverrides)); } catch { /* ignored */ } }, [tripYearOverrides]);
 
+  const normalizeYearValue = useCallback(value => {
+    if (SPECIAL_TIMELINE_BUCKETS.includes(value)) return value;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 1;
+  }, []);
+
   const yearPlan = useMemo(() => {
     // Build year map from auto plan as defaults, then apply overrides
     const tripToYear = {};
-    autoYearPlan.forEach(y => y.trips.forEach(t => { tripToYear[t.id] = y.year; }));
-    // Apply user overrides
-    Object.entries(tripYearOverrides).forEach(([id, yr]) => { tripToYear[Number(id)] = yr; });
+    autoYearPlan.forEach(y => y.trips.forEach(t => { tripToYear[t.timelineId] = y.year; }));
     // Group trips by year
     const yearMap = {};
-    ACTIVE_TRIPS.forEach(t => {
-      const yr = tripToYear[t.id] || 1;
-      if (!yearMap[yr]) yearMap[yr] = { year: yr, trips: [], leave: 0, days: 0, cost: 0 };
-      yearMap[yr].trips.push(t);
-      yearMap[yr].leave += t.leave;
-      yearMap[yr].days += t.days;
-      yearMap[yr].cost += t.cost;
+    timelineItems.forEach(t => {
+      const override = tripYearOverrides[t.timelineId];
+      const baseOverride = tripYearOverrides[t.baseKey];
+      const resolved = normalizeYearValue(override ?? baseOverride ?? tripToYear[t.timelineId] ?? 1);
+      if (!yearMap[resolved]) yearMap[resolved] = { year: resolved, trips: [], leave: 0, days: 0, cost: 0 };
+      yearMap[resolved].trips.push({ ...t, assignedYear: resolved });
+      yearMap[resolved].leave += t.leave;
+      yearMap[resolved].days += t.days;
+      yearMap[resolved].cost += t.cost;
     });
-    return Object.values(yearMap).sort((a, b) => a.year - b.year);
-  }, [autoYearPlan, tripYearOverrides]);
+    return Object.values(yearMap).sort((a, b) => {
+      const aNum = typeof a.year === "number";
+      const bNum = typeof b.year === "number";
+      if (aNum && bNum) return a.year - b.year;
+      if (aNum) return -1;
+      if (bNum) return 1;
+      return SPECIAL_TIMELINE_BUCKETS.indexOf(String(a.year)) - SPECIAL_TIMELINE_BUCKETS.indexOf(String(b.year));
+    });
+  }, [autoYearPlan, tripYearOverrides, timelineItems, normalizeYearValue]);
 
-  const totalYears = yearPlan.length > 0 ? yearPlan[yearPlan.length - 1].year : 0;
+  const numericYears = yearPlan.filter(y => typeof y.year === "number");
+  const totalYears = numericYears.reduce((max, y) => Math.max(max, y.year), 0);
+  const timelineYearOptions = useMemo(() => {
+    const maxYear = Math.max(totalYears, 1);
+    return Array.from({ length: maxYear + 2 }, (_, i) => i + 1);
+  }, [totalYears]);
+  const unscheduledSummary = useMemo(() => {
+    const special = yearPlan.filter(y => typeof y.year !== "number");
+    return {
+      trips: special.reduce((s, y) => s + y.trips.length, 0),
+      leave: special.reduce((s, y) => s + y.leave, 0),
+      days: special.reduce((s, y) => s + y.days, 0),
+      cost: special.reduce((s, y) => s + y.cost, 0),
+    };
+  }, [yearPlan]);
+  const hasYearOverrides = Object.keys(tripYearOverrides).length > 0;
+  const hasUnscheduled = unscheduledSummary.trips > 0;
+  const scheduledLeave = Math.max(stats.tl - unscheduledSummary.leave, 0);
 
   const moveTripToYear = useCallback((tripId, newYear) => {
-    setTripYearOverrides(prev => ({ ...prev, [tripId]: newYear }));
+    setTripYearOverrides(prev => ({ ...prev, [tripId]: normalizeYearValue(newYear) }));
+  }, [normalizeYearValue]);
+
+  const setTripSplit = useCallback((tripId, shouldSplit) => {
+    setSplitTripOverrides(prev => {
+      const next = { ...prev };
+      if (shouldSplit) next[tripId] = true;
+      else delete next[tripId];
+      return next;
+    });
   }, []);
 
   const resetTimeline = useCallback(() => {
@@ -875,6 +962,9 @@ export default function Planner() {
   };
 
   const progressPct = (VISITED_COUNTRIES + stats.dc) / TOTAL_COUNTRIES * 100;
+  const projectedYear = totalYears > 0 ? 2026 + totalYears : null;
+  const formatDayCount = value => (Number.isInteger(value) ? value : value.toFixed(1));
+  const formatCost = value => `£${Math.round(value).toLocaleString()}`;
 
   return (
     <div style={{ minHeight: "100vh", background: T.bg, color: T.text, fontFamily: "'DM Sans', sans-serif", transition: "background 0.3s ease, color 0.3s ease" }}>
@@ -917,7 +1007,7 @@ export default function Planner() {
             <div style={{ minWidth: 0 }}>
               <div style={{ ...S.mono, fontSize: 11, color: "#e94560", letterSpacing: 3, textTransform: "uppercase", marginBottom: 6 }}>Every Country Project</div>
               <h1 style={{ fontSize: "clamp(18px, 4vw, 26px)", fontWeight: 700, margin: 0, color: T.headerText }}>{stats.tc} Countries · {ACTIVE_TRIPS.length} Trips</h1>
-              <div style={{ fontSize: 13, color: T.headerSoft, marginTop: 6 }}>London · 32 days leave/year · {VISITED_COUNTRIES} done · weekends + bank holidays = free travel days</div>
+              <div style={{ fontSize: 13, color: T.headerSoft, marginTop: 6 }}>London · {leavePerYear} days leave/year · {VISITED_COUNTRIES} done · weekends + bank holidays = free travel days</div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               {/* Progress Ring */}
@@ -948,7 +1038,7 @@ export default function Planner() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginTop: 18 }}>
             {[
               { l: "TRIPS", v: ACTIVE_TRIPS.length, s: `${ACTIVE_TRIPS.length - done.size} left`, icon: "✈️" },
-              { l: "LEAVE DAYS", v: stats.tl, s: `~${stats.yr} yrs at 32/yr`, icon: "📅" },
+              { l: "LEAVE DAYS", v: stats.tl, s: `~${stats.yr} yrs at ${leavePerYear}/yr`, icon: "📅" },
               { l: "TOTAL DAYS", v: stats.td, s: `${stats.td - stats.tl} are free weekends`, icon: "🌍" },
               { l: "EST. COST", v: `£${(stats.tco/1000).toFixed(0)}k`, s: `£${((stats.tco-stats.dco)/1000).toFixed(0)}k left`, icon: "💷" },
               { l: "PROGRESS", v: `${VISITED_COUNTRIES + stats.dc}/${TOTAL_COUNTRIES}`, s: `${Math.round(progressPct)}% complete`, icon: "📊" },
@@ -1099,7 +1189,7 @@ export default function Planner() {
                           )}
                           <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
                             {[
-                              ["LEAVE DAYS", `${trip.leave} of 32`],
+                              ["LEAVE DAYS", `${trip.leave} of ${leavePerYear}`],
                               ["TOTAL DAYS", trip.days],
                               ["FREE DAYS", trip.days - trip.leave],
                               ["BEST MONTHS", trip.months],
@@ -1270,84 +1360,153 @@ export default function Planner() {
           <div style={{ paddingTop: 18, paddingBottom: 40 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
               <div style={{ fontSize: 13, color: T.textSoft, lineHeight: 1.6 }}>
-                Year-by-year plan packing trips into 32 leave days. Use the dropdowns to move trips between years.
+                Year-by-year plan packing trips into {leavePerYear} leave days. Use the dropdowns to move trips, mark TBC/?, or split multi-country trips.
               </div>
-              {Object.keys(tripYearOverrides).length > 0 && (
-                <button onClick={resetTimeline} style={{
-                  padding: "5px 12px", borderRadius: 6, border: `1px solid ${T.border}`,
-                  background: T.cardBg, color: T.textSoft, fontSize: 11, cursor: "pointer",
-                  ...S.mono, letterSpacing: 0.5, flexShrink: 0,
-                }}>↺ Reset to auto</button>
-              )}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 6, border: `1px solid ${T.border}`, background: T.cardBg }}>
+                  <span style={{ ...S.mono, fontSize: 9, color: T.textMuted, letterSpacing: 1 }}>LEAVE/YR</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={leavePerYear}
+                    onChange={e => {
+                      const next = Number(e.target.value);
+                      if (Number.isFinite(next) && next > 0) setLeavePerYear(next);
+                    }}
+                    style={{
+                      width: 52, border: "none", background: "transparent", color: T.inputText,
+                      fontSize: 11, ...S.mono, outline: "none",
+                    }}
+                  />
+                </div>
+                {hasYearOverrides && (
+                  <button onClick={resetTimeline} style={{
+                    padding: "5px 12px", borderRadius: 6, border: `1px solid ${T.border}`,
+                    background: T.cardBg, color: T.textSoft, fontSize: 11, cursor: "pointer",
+                    ...S.mono, letterSpacing: 0.5, flexShrink: 0,
+                  }}>↺ Reset to auto</button>
+                )}
+              </div>
             </div>
             <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 18, padding: "8px 10px", background: dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)", borderRadius: 6 }}>
               🇬🇧 UK bank holidays: New Year · Good Friday + Easter Monday · Early May · Late May · August · Christmas + Boxing Day.
               Each one adjacent to a weekend can save 1 leave day. Easter alone = 10 days for 4 leave.
             </div>
-            {yearPlan.map((year, yi) => (
-              <div key={year.year} style={{ marginBottom: 18 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
-                  <div style={{ ...S.mono, fontSize: 11, color: "#e94560", background: dark ? "rgba(233,69,96,0.12)" : "rgba(233,69,96,0.06)", padding: "3px 9px", borderRadius: 4, letterSpacing: 1 }}>YEAR {year.year}</div>
-                  <div style={{ fontSize: 11, color: T.textSoft }}>
-                    <strong style={{ color: year.leave > 32 ? "#c0392b" : "#e94560" }}>{year.leave} leave</strong>
-                    <span style={{ color: T.textMuted }}> / 32</span>
-                    {year.leave > 32 && <span style={{ color: "#c0392b", marginLeft: 4, fontSize: 10 }}>⚠ over budget!</span>}
-                    <span style={{ marginLeft: 8 }}>{year.days} total days</span>
-                    <span style={{ marginLeft: 8, color: T.textMuted }}>£{year.cost.toLocaleString()}</span>
+            {yearPlan.map(year => {
+              const isSpecial = typeof year.year !== "number";
+              const overBudget = !isSpecial && year.leave > leavePerYear;
+              const leaveRatio = !isSpecial ? year.leave / leavePerYear : 0;
+              const barColor = overBudget ? "#c0392b" : leaveRatio > 0.9 ? "#e94560" : leaveRatio > 0.8 ? "#e67e22" : "#27ae60";
+              const yearLabel = isSpecial ? String(year.year) : `YEAR ${year.year}`;
+              return (
+                <div key={year.year} style={{ marginBottom: 18 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
+                    <div style={{ ...S.mono, fontSize: 11, color: "#e94560", background: dark ? "rgba(233,69,96,0.12)" : "rgba(233,69,96,0.06)", padding: "3px 9px", borderRadius: 4, letterSpacing: 1 }}>{yearLabel}</div>
+                    <div style={{ fontSize: 11, color: T.textSoft }}>
+                      {isSpecial ? (
+                        <>
+                          <strong style={{ color: "#e94560" }}>{formatDayCount(year.leave)} leave</strong>
+                          <span style={{ marginLeft: 6, color: T.textMuted }}>unscheduled</span>
+                        </>
+                      ) : (
+                        <>
+                          <strong style={{ color: overBudget ? "#c0392b" : "#e94560" }}>{formatDayCount(year.leave)} leave</strong>
+                          <span style={{ color: T.textMuted }}> / {leavePerYear}</span>
+                          {overBudget && <span style={{ color: "#c0392b", marginLeft: 4, fontSize: 10 }}>⚠ over budget!</span>}
+                        </>
+                      )}
+                      <span style={{ marginLeft: 8 }}>{formatDayCount(year.days)} total days</span>
+                      <span style={{ marginLeft: 8, color: T.textMuted }}>{formatCost(year.cost)}</span>
+                    </div>
+                    <div style={{ flex: 1, height: 1, background: T.border, minWidth: 20 }} />
                   </div>
-                  <div style={{ flex: 1, height: 1, background: T.border, minWidth: 20 }} />
-                </div>
-                {/* Leave usage bar */}
-                <div style={{ height: 6, background: dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)", borderRadius: 3, marginBottom: 6, marginLeft: 6, marginRight: 6, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${Math.min(year.leave / 32 * 100, 100)}%`, background: year.leave > 32 ? "#c0392b" : year.leave > 30 ? "#e94560" : year.leave > 25 ? "#e67e22" : "#27ae60", borderRadius: 3, transition: "width 0.5s ease" }} />
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 3, paddingLeft: 6 }}>
-                  {year.trips.map(t => {
-                    const isDone = done.has(t.id);
-                    return (
-                      <div key={t.id} style={{
-                        display: "flex", alignItems: "center", gap: 8, padding: "7px 10px",
-                        background: isDone ? (dark ? "rgba(39,174,96,0.08)" : "rgba(39,174,96,0.05)") : T.cardBg,
-                        borderRadius: 5, borderLeft: `3px solid ${REGION_COLORS[t.region]?.accent || "#888"}`,
-                        boxShadow: `0 1px 2px rgba(0,0,0,${dark ? "0.15" : "0.02"})`,
-                        opacity: isDone ? 0.6 : 1, transition: "opacity 0.2s ease",
-                        flexWrap: "wrap",
-                      }}>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <span style={{ fontSize: 12.5, color: T.text }}>{t.name}</span>
-                          <span style={{ fontSize: 10.5, color: T.textMuted, marginLeft: 6 }}>{t.countries.length} ctry</span>
-                          {isDone && <span style={{ fontSize: 9, marginLeft: 6, color: "#27ae60" }}>✓</span>}
+                  {/* Leave usage bar */}
+                  {!isSpecial && (
+                    <div style={{ height: 6, background: dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)", borderRadius: 3, marginBottom: 6, marginLeft: 6, marginRight: 6, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${Math.min(leaveRatio * 100, 100)}%`, background: barColor, borderRadius: 3, transition: "width 0.5s ease" }} />
+                    </div>
+                  )}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 3, paddingLeft: 6 }}>
+                    {year.trips.map(t => {
+                      const isDone = done.has(t.id);
+                      const canSplit = t.splitCount > 1 && !t.isSplit;
+                      const canCombine = t.isSplit;
+                      return (
+                        <div key={t.timelineId} style={{
+                          display: "flex", alignItems: "center", gap: 8, padding: "7px 10px",
+                          background: isDone ? (dark ? "rgba(39,174,96,0.08)" : "rgba(39,174,96,0.05)") : T.cardBg,
+                          borderRadius: 5, borderLeft: `3px solid ${REGION_COLORS[t.region]?.accent || "#888"}`,
+                          boxShadow: `0 1px 2px rgba(0,0,0,${dark ? "0.15" : "0.02"})`,
+                          opacity: isDone ? 0.6 : 1, transition: "opacity 0.2s ease",
+                          flexWrap: "wrap",
+                        }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <span style={{ fontSize: 12.5, color: T.text }}>{t.displayName}</span>
+                            {t.splitParent && <span style={{ fontSize: 10, color: T.textMuted, marginLeft: 6 }}>({t.splitParent})</span>}
+                            <span style={{ fontSize: 10.5, color: T.textMuted, marginLeft: 6 }}>{t.countries.length} ctry</span>
+                            {isDone && <span style={{ fontSize: 9, marginLeft: 6, color: "#27ae60" }}>✓</span>}
+                          </div>
+                          <span style={{ fontSize: 11, color: "#e94560", fontWeight: 600, ...S.mono }}>{formatDayCount(t.leave)}d leave</span>
+                          <span style={{ fontSize: 11, color: T.textMuted, ...S.mono }}>{formatDayCount(t.days)}d total</span>
+                          <span style={{ fontSize: 11, color: T.textMuted, ...S.mono }}>{formatCost(t.cost)}</span>
+                          {canSplit && (
+                            <button
+                              onClick={e => { e.stopPropagation(); setTripSplit(t.id, true); }}
+                              style={{
+                                padding: "2px 6px", borderRadius: 4, border: `1px dashed ${T.border}`,
+                                background: T.cardBg, color: T.textMuted, fontSize: 9, cursor: "pointer",
+                                ...S.mono, letterSpacing: 0.5,
+                              }}
+                            >
+                              Split
+                            </button>
+                          )}
+                          {canCombine && (
+                            <button
+                              onClick={e => { e.stopPropagation(); setTripSplit(t.id, false); }}
+                              style={{
+                                padding: "2px 6px", borderRadius: 4, border: `1px dashed ${T.border}`,
+                                background: T.cardBg, color: T.textMuted, fontSize: 9, cursor: "pointer",
+                                ...S.mono, letterSpacing: 0.5,
+                              }}
+                            >
+                              Combine
+                            </button>
+                          )}
+                          <select
+                            value={String(t.assignedYear)}
+                            onChange={e => moveTripToYear(t.timelineId, e.target.value)}
+                            onClick={e => e.stopPropagation()}
+                            style={{
+                              padding: "2px 4px", borderRadius: 4, border: `1px solid ${T.border}`,
+                              background: T.cardBg, color: T.inputText, fontSize: 10,
+                              cursor: "pointer", ...S.mono, minWidth: 62,
+                            }}
+                            title="Move to different year"
+                          >
+                            {timelineYearOptions.map(y => (
+                              <option key={y} value={String(y)}>Yr {y}</option>
+                            ))}
+                            {SPECIAL_TIMELINE_BUCKETS.map(label => (
+                              <option key={label} value={label}>{label}</option>
+                            ))}
+                          </select>
                         </div>
-                        <span style={{ fontSize: 11, color: "#e94560", fontWeight: 600, ...S.mono }}>{t.leave}d leave</span>
-                        <span style={{ fontSize: 11, color: T.textMuted, ...S.mono }}>{t.days}d total</span>
-                        <span style={{ fontSize: 11, color: T.textMuted, ...S.mono }}>£{t.cost.toLocaleString()}</span>
-                        <select
-                          value={year.year}
-                          onChange={e => moveTripToYear(t.id, Number(e.target.value))}
-                          onClick={e => e.stopPropagation()}
-                          style={{
-                            padding: "2px 4px", borderRadius: 4, border: `1px solid ${T.border}`,
-                            background: T.cardBg, color: T.inputText, fontSize: 10,
-                            cursor: "pointer", ...S.mono, minWidth: 52,
-                          }}
-                          title="Move to different year"
-                        >
-                          {Array.from({ length: totalYears + 2 }, (_, i) => i + 1).map(y => (
-                            <option key={y} value={y}>Yr {y}</option>
-                          ))}
-                        </select>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             <div style={{ marginTop: 20, padding: 14, background: dark ? "rgba(233,69,96,0.08)" : "rgba(192,57,43,0.04)", border: "1px solid rgba(233,69,96,0.15)", borderRadius: 8 }}>
               <div style={{ ...S.mono, fontSize: 10, color: "#e94560", letterSpacing: 1.5, marginBottom: 5 }}>PROJECTED COMPLETION</div>
-              <div style={{ fontSize: 13.5, color: T.text }}>~{totalYears} years using {stats.tl} leave days → all {TOTAL_COUNTRIES} by ~{2026 + totalYears}</div>
+              <div style={{ fontSize: 13.5, color: T.text }}>
+                {totalYears > 0 ? `~${totalYears} years using ${formatDayCount(scheduledLeave)} leave days → all ${TOTAL_COUNTRIES} by ~${projectedYear}` : "Assign at least one year to see a projection."}
+              </div>
               <div style={{ fontSize: 12, color: T.textSoft, marginTop: 3 }}>
-                {stats.td} total travel days but only {stats.tl} cost leave — {stats.td - stats.tl} days are free weekends/BHs. Conflict zones add 3–5 year buffer. Bank holiday arbitrage could shave off another year.
-                {yearPlan.some(y => y.leave > 32) && <span style={{ color: "#c0392b" }}> ⚠ Some years exceed 32 leave days — adjust by moving trips.</span>}
+                {formatDayCount(stats.td)} total travel days but only {formatDayCount(stats.tl)} cost leave — {formatDayCount(stats.td - stats.tl)} days are free weekends/BHs. Conflict zones add 3–5 year buffer. Bank holiday arbitrage could shave off another year.
+                {yearPlan.some(y => typeof y.year === "number" && y.leave > leavePerYear) && <span style={{ color: "#c0392b" }}> ⚠ Some years exceed {leavePerYear} leave days — adjust by moving trips.</span>}
+                {hasUnscheduled && <span style={{ color: T.textMuted }}> {unscheduledSummary.trips} trips ({formatDayCount(unscheduledSummary.leave)} leave days) marked TBC/?.</span>}
               </div>
             </div>
           </div>
